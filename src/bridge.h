@@ -52,7 +52,7 @@ namespace rustbridge {
         bool sequential_download,
         int32_t max_connections,
         int32_t max_uploads,
-        rust::String resume_data
+        rust::Slice<const uint8_t> resume_data
     );
 
     std::unique_ptr<torrent_handle> bridge_add_torrent_file(
@@ -62,7 +62,7 @@ namespace rustbridge {
         bool sequential_download,
         int32_t max_connections,
         int32_t max_uploads,
-        rust::String resume_data
+        rust::Slice<const uint8_t> resume_data
     );
 
     void bridge_remove_torrent(session &ses, const torrent_handle &hdl, bool remove_files);
@@ -75,7 +75,7 @@ namespace rustbridge {
     rust::Vec<PeerInfo> bridge_get_torrent_peers(const torrent_handle &hdl);
     rust::Vec<AlertInfo> bridge_pop_alerts(session &ses);
     SessionStats bridge_get_session_stats(const session &ses);
-    rust::String bridge_get_resume_data(const torrent_handle &hdl);
+    rust::Vec<uint8_t> bridge_get_resume_data(const torrent_handle &hdl);
 
     rust::String bridge_get_libtorrent_version();
     rust::String bridge_info_hash_to_string(const torrent_handle &hdl);

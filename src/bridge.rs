@@ -132,7 +132,7 @@ pub mod ffi {
             sequential_download: bool,
             max_connections: i32,
             max_uploads: i32,
-            resume_data: String,
+            resume_data: &[u8],
         ) -> Result<UniquePtr<torrent_handle>>;
 
         pub fn bridge_add_torrent_file(
@@ -142,7 +142,7 @@ pub mod ffi {
             sequential_download: bool,
             max_connections: i32,
             max_uploads: i32,
-            resume_data: String,
+            resume_data: &[u8],
         ) -> Result<UniquePtr<torrent_handle>>;
 
         pub fn bridge_remove_torrent(
@@ -171,7 +171,7 @@ pub mod ffi {
         pub fn bridge_get_session_stats(ses: &session) -> SessionStats;
 
         // Resume data
-        pub fn bridge_get_resume_data(hdl: &torrent_handle) -> String;
+        pub fn bridge_get_resume_data(hdl: &torrent_handle) -> Vec<u8>;
 
         // Utility
         pub fn bridge_get_libtorrent_version() -> String;

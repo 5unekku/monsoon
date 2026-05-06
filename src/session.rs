@@ -33,9 +33,6 @@ impl Session {
         save_path: &str,
         resume_data: Option<Vec<u8>>,
     ) -> Result<TorrentHandle> {
-        let resume_str = resume_data
-            .map(|data| String::from_utf8_lossy(&data).to_string())
-            .unwrap_or_default();
         let inner = ffi::bridge_add_torrent_magnet(
             self.inner.pin_mut(),
             magnet_uri,
@@ -43,7 +40,7 @@ impl Session {
             false,
             -1,
             -1,
-            resume_str,
+            resume_data.as_deref().unwrap_or(&[]),
         )
         .context("add magnet")?;
         Ok(TorrentHandle { inner })
@@ -55,9 +52,6 @@ impl Session {
         save_path: &str,
         resume_data: Option<Vec<u8>>,
     ) -> Result<TorrentHandle> {
-        let resume_str = resume_data
-            .map(|data| String::from_utf8_lossy(&data).to_string())
-            .unwrap_or_default();
         let inner = ffi::bridge_add_torrent_file(
             self.inner.pin_mut(),
             torrent_path,
@@ -65,7 +59,7 @@ impl Session {
             false,
             -1,
             -1,
-            resume_str,
+            resume_data.as_deref().unwrap_or(&[]),
         )
         .context("add torrent file")?;
         Ok(TorrentHandle { inner })
@@ -104,7 +98,7 @@ impl TorrentHandle {
     pub fn info_hash(&self) -> String { ffi::bridge_info_hash_to_string(&self.inner) }
 
     pub fn resume_data(&self) -> Vec<u8> {
-        ffi::bridge_get_resume_data(&self.inner).into_bytes()
+        ffi::bridge_get_resume_data(&self.inner)
     }
 
     // wired up but not yet exposed through the cli — reserved for per-file priority

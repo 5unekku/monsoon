@@ -4,6 +4,10 @@
 #include <sstream>
 #include <stdexcept>
 
+// suppress deprecated warnings for apis we have to keep using until async
+// session stats and async resume saves are wired up properly
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+
 namespace rustbridge {
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
@@ -38,6 +42,13 @@ static void apply_settings_pack(lt::settings_pack &pack, const SessionSettings &
     pack.set_int(lt::settings_pack::active_limit, s.max_active_torrents);
 }
 
+// return best available info hash as a hex string (v1 preferred, v2 fallback)
+static std::string info_hash_str(const lt::info_hash_t &ih) {
+    if (ih.has_v1()) return ih.v1.to_string();
+    if (ih.has_v2()) return ih.v2.to_string();
+    return "";
+}
+
 // ─── Session Management ────────────────────────────────────────────────────
 
 std::unique_ptr<lt::session> bridge_create_session(
@@ -50,21 +61,18 @@ std::unique_ptr<lt::session> bridge_create_session(
 
     pack.set_int(lt::settings_pack::alert_mask, alert_mask);
 
-    if (listen_interfaces.size() > 0) {
-        pack.set_str(lt::settings_pack::listen_interfaces, std::string(listen_interfaces));
-    } else {
-        pack.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:6881,[::]:6881");
-    }
+    pack.set_str(lt::settings_pack::listen_interfaces,
+        listen_interfaces.size() > 0
+            ? std::string(listen_interfaces)
+            : std::string("0.0.0.0:6881,[::]:6881"));
 
-    if (user_agent.size() > 0) {
+    if (user_agent.size() > 0)
         pack.set_str(lt::settings_pack::user_agent, std::string(user_agent));
-    }
 
     pack.set_str(lt::settings_pack::dht_bootstrap_nodes,
         "dht.libtorrent.org:25401,router.bittorrent.com:6881,"
         "dht.transmissionbt.com:6881,router.utorrent.com:6881");
 
-    // active tracker/dht/lsd limits — rarely need tuning
     pack.set_int(lt::settings_pack::active_tracker_limit, 100);
     pack.set_int(lt::settings_pack::active_dht_limit, 100);
     pack.set_int(lt::settings_pack::active_lsd_limit, 100);
@@ -91,27 +99,24 @@ std::unique_ptr<lt::torrent_handle> bridge_add_torrent_magnet(
     bool sequential_download,
     int32_t max_connections,
     int32_t max_uploads,
-    rust::String resume_data
+    rust::Slice<const uint8_t> resume_data
 ) {
     lt::add_torrent_params p;
     lt::error_code ec;
 
     lt::parse_magnet_uri(std::string(magnet_uri), p, ec);
-    if (ec) {
-        throw std::runtime_error("parse magnet URI: " + ec.message());
-    }
+    if (ec) throw std::runtime_error("parse magnet URI: " + ec.message());
 
     p.save_path = std::string(save_path);
-    if (sequential_download) {
-        p.flags |= lt::torrent_flags::sequential_download;
-    }
+    if (sequential_download) p.flags |= lt::torrent_flags::sequential_download;
     p.max_connections = max_connections;
     p.max_uploads = max_uploads;
 
     if (resume_data.size() > 0) {
         lt::error_code resume_ec;
         auto resumed = lt::read_resume_data(
-            lt::span<char const>(resume_data.data(), resume_data.size()), resume_ec);
+            lt::span<char const>(reinterpret_cast<char const*>(resume_data.data()), resume_data.size()),
+            resume_ec);
         if (!resume_ec) {
             p = std::move(resumed);
             p.save_path = std::string(save_path);
@@ -119,9 +124,7 @@ std::unique_ptr<lt::torrent_handle> bridge_add_torrent_magnet(
     }
 
     lt::torrent_handle h = ses.add_torrent(std::move(p), ec);
-    if (ec) {
-        throw std::runtime_error("add torrent: " + ec.message());
-    }
+    if (ec) throw std::runtime_error("add torrent: " + ec.message());
     return std::make_unique<lt::torrent_handle>(std::move(h));
 }
 
@@ -132,28 +135,25 @@ std::unique_ptr<lt::torrent_handle> bridge_add_torrent_file(
     bool sequential_download,
     int32_t max_connections,
     int32_t max_uploads,
-    rust::String resume_data
+    rust::Slice<const uint8_t> resume_data
 ) {
     lt::add_torrent_params p;
     lt::error_code ec;
 
     lt::torrent_info ti(std::string(torrent_path), ec);
-    if (ec) {
-        throw std::runtime_error("load torrent file: " + ec.message());
-    }
+    if (ec) throw std::runtime_error("load torrent file: " + ec.message());
     p.ti = std::make_shared<lt::torrent_info>(std::move(ti));
     p.save_path = std::string(save_path);
 
-    if (sequential_download) {
-        p.flags |= lt::torrent_flags::sequential_download;
-    }
+    if (sequential_download) p.flags |= lt::torrent_flags::sequential_download;
     p.max_connections = max_connections;
     p.max_uploads = max_uploads;
 
     if (resume_data.size() > 0) {
         lt::error_code resume_ec;
         auto resumed = lt::read_resume_data(
-            lt::span<char const>(resume_data.data(), resume_data.size()), resume_ec);
+            lt::span<char const>(reinterpret_cast<char const*>(resume_data.data()), resume_data.size()),
+            resume_ec);
         if (!resume_ec) {
             p = std::move(resumed);
             p.save_path = std::string(save_path);
@@ -161,18 +161,13 @@ std::unique_ptr<lt::torrent_handle> bridge_add_torrent_file(
     }
 
     lt::torrent_handle h = ses.add_torrent(std::move(p), ec);
-    if (ec) {
-        throw std::runtime_error("add torrent: " + ec.message());
-    }
+    if (ec) throw std::runtime_error("add torrent: " + ec.message());
     return std::make_unique<lt::torrent_handle>(std::move(h));
 }
 
 void bridge_remove_torrent(lt::session &ses, const lt::torrent_handle &hdl, bool remove_files) {
-    if (remove_files) {
-        ses.remove_torrent(hdl, lt::session::delete_files);
-    } else {
-        ses.remove_torrent(hdl);
-    }
+    if (remove_files) ses.remove_torrent(hdl, lt::session::delete_files);
+    else ses.remove_torrent(hdl);
 }
 
 void bridge_torrent_force_recheck(const lt::torrent_handle &hdl) { hdl.force_recheck(); }
@@ -188,7 +183,6 @@ static std::string state_to_string(lt::torrent_status::state_t state) {
         case lt::torrent_status::downloading:           return "downloading";
         case lt::torrent_status::finished:              return "finished";
         case lt::torrent_status::seeding:               return "seeding";
-        case lt::torrent_status::allocating:            return "allocating";
         case lt::torrent_status::checking_resume_data:  return "checking_resume_data";
         default:                                        return "unknown";
     }
@@ -204,7 +198,7 @@ rustbridge::TorrentStatus bridge_get_torrent_status(const lt::torrent_handle &hd
 
     lt::torrent_status st = hdl.status();
     ts.name = rust::String(st.name.c_str());
-    ts.info_hash = rust::String(st.info_hash.to_string().c_str());
+    ts.info_hash = rust::String(info_hash_str(hdl.info_hashes()).c_str());
     ts.state = rust::String(state_to_string(st.state).c_str());
     ts.save_path = rust::String(st.save_path.c_str());
     ts.progress = st.progress;
@@ -214,16 +208,14 @@ rustbridge::TorrentStatus bridge_get_torrent_status(const lt::torrent_handle &hd
     ts.total_wanted = st.total_wanted;
     ts.download_rate = st.download_rate;
     ts.upload_rate = st.upload_rate;
-    // num_peers = all connected (seeds + leechers), num_seeds = connected seeds
     ts.connected_peers = st.num_peers;
     ts.connected_seeds = st.num_seeds;
-    // list_peers/seeds = total known (connected + disconnected)
     ts.total_peers = st.list_peers;
     ts.total_seeds = st.list_seeds;
     ts.num_pieces = st.num_pieces;
     ts.num_completed_pieces = (int32_t)st.pieces.count();
     ts.error = rust::String(st.errc.message().c_str());
-    ts.is_paused = st.paused;
+    ts.is_paused = bool(st.flags & lt::torrent_flags::paused);
     ts.is_finished = st.is_finished;
     ts.is_seeding = st.state == lt::torrent_status::seeding;
     ts.has_metadata = hdl.torrent_file() != nullptr;
@@ -267,14 +259,13 @@ rust::Vec<rustbridge::PeerInfo> bridge_get_torrent_peers(const lt::torrent_handl
         pi.upload_rate = p.up_speed;
         pi.client = rust::String(p.client.c_str());
         pi.progress = p.progress;
-        // build a short flags string from the peer_info bitfield
         std::string flags;
-        if (p.flags & lt::peer_info::seed)           flags += "S";
-        if (p.flags & lt::peer_info::optimistic_unchoke) flags += "O";
-        if (p.flags & lt::peer_info::snubbed)        flags += "s";
-        if (p.flags & lt::peer_info::upload_only)    flags += "U";
-        if (p.flags & lt::peer_info::holepunched)    flags += "H";
-        if (p.flags & lt::peer_info::rc4_encrypted)  flags += "E";
+        if (p.flags & lt::peer_info::seed)                flags += "S";
+        if (p.flags & lt::peer_info::optimistic_unchoke)  flags += "O";
+        if (p.flags & lt::peer_info::snubbed)             flags += "s";
+        if (p.flags & lt::peer_info::upload_only)         flags += "U";
+        if (p.flags & lt::peer_info::holepunched)         flags += "H";
+        if (p.flags & lt::peer_info::rc4_encrypted)       flags += "E";
         if (p.flags & lt::peer_info::plaintext_encrypted) flags += "e";
         pi.flags = rust::String(flags.c_str());
         peers.push_back(std::move(pi));
@@ -293,33 +284,24 @@ rust::Vec<rustbridge::AlertInfo> bridge_pop_alerts(lt::session &ses) {
         ai.timestamp = a->timestamp().time_since_epoch().count();
         ai.message = rust::String(a->message().c_str());
         ai.alert_type = rust::String(a->what());
-        // category() returns a bitmask of alert::category_t flags
         int cat = a->category();
-        if (cat & lt::alert::error_notification) {
-            ai.category = rust::String("error");
-        } else if (cat & lt::alert::status_notification) {
-            ai.category = rust::String("status");
-        } else if (cat & lt::alert::storage_notification) {
-            ai.category = rust::String("storage");
-        } else if (cat & lt::alert::tracker_notification) {
-            ai.category = rust::String("tracker");
-        } else if (cat & lt::alert::progress_notification) {
-            ai.category = rust::String("progress");
-        } else if (cat & lt::alert::peer_notification) {
-            ai.category = rust::String("peer");
-        } else if (cat & lt::alert::dht_notification) {
-            ai.category = rust::String("dht");
-        } else if (cat & lt::alert::port_mapping_notification) {
-            ai.category = rust::String("port_mapping");
-        } else {
-            ai.category = rust::String("other");
-        }
+        if      (cat & lt::alert::error_notification)        ai.category = rust::String("error");
+        else if (cat & lt::alert::status_notification)       ai.category = rust::String("status");
+        else if (cat & lt::alert::storage_notification)      ai.category = rust::String("storage");
+        else if (cat & lt::alert::tracker_notification)      ai.category = rust::String("tracker");
+        else if (cat & lt::alert::peer_notification)         ai.category = rust::String("peer");
+        else if (cat & lt::alert::dht_notification)          ai.category = rust::String("dht");
+        else if (cat & lt::alert::port_mapping_notification) ai.category = rust::String("port_mapping");
+        else                                                 ai.category = rust::String("other");
         alerts.push_back(std::move(ai));
     }
     return alerts;
 }
 
 // ─── Session Stats ─────────────────────────────────────────────────────────
+// TODO: migrate to async post_session_stats() + session_stats_alert
+// the synchronous session_status() api is deprecated in libtorrent 2.x but
+// the async replacement requires wiring up a stats accumulation loop
 
 rustbridge::SessionStats bridge_get_session_stats(const lt::session &ses) {
     rustbridge::SessionStats ss = {};
@@ -334,13 +316,17 @@ rustbridge::SessionStats bridge_get_session_stats(const lt::session &ses) {
 }
 
 // ─── Resume Data ───────────────────────────────────────────────────────────
+// TODO: migrate to async save_resume_data() + save_resume_data_alert
+// write_resume_data() is deprecated; returning raw bytes avoids utf-8 corruption
 
-rust::String bridge_get_resume_data(const lt::torrent_handle &hdl) {
-    if (!hdl.is_valid()) return rust::String("");
+rust::Vec<uint8_t> bridge_get_resume_data(const lt::torrent_handle &hdl) {
+    rust::Vec<uint8_t> result;
+    if (!hdl.is_valid()) return result;
     lt::entry rd = hdl.write_resume_data();
     std::vector<char> buf;
     lt::bencode(std::back_inserter(buf), rd);
-    return rust::String(buf.data(), buf.size());
+    for (char c : buf) result.push_back(static_cast<uint8_t>(c));
+    return result;
 }
 
 // ─── Utility ───────────────────────────────────────────────────────────────
@@ -349,7 +335,7 @@ rust::String bridge_get_libtorrent_version() { return rust::String(LIBTORRENT_VE
 
 rust::String bridge_info_hash_to_string(const lt::torrent_handle &hdl) {
     if (!hdl.is_valid()) return rust::String("");
-    return rust::String(hdl.info_hash().to_string().c_str());
+    return rust::String(info_hash_str(hdl.info_hashes()).c_str());
 }
 
 bool bridge_torrent_is_valid(const lt::torrent_handle &hdl) { return hdl.is_valid(); }
@@ -357,16 +343,15 @@ bool bridge_torrent_is_valid(const lt::torrent_handle &hdl) { return hdl.is_vali
 // ─── File Priority ─────────────────────────────────────────────────────────
 
 void bridge_set_file_priority(const lt::torrent_handle &hdl, int32_t file_index, int32_t priority) {
-    if (hdl.is_valid()) hdl.file_priority(file_index, priority);
+    if (hdl.is_valid())
+        hdl.file_priority(lt::file_index_t{file_index}, lt::download_priority_t{static_cast<uint8_t>(priority)});
 }
 
 rust::Vec<int32_t> bridge_get_file_priorities(const lt::torrent_handle &hdl) {
-    rust::Vec<int32_t> priorities;
-    if (!hdl.is_valid()) return priorities;
-    for (auto priority : hdl.file_priorities()) {
-        priorities.push_back(static_cast<int32_t>(priority));
-    }
-    return priorities;
+    rust::Vec<int32_t> result;
+    if (!hdl.is_valid()) return result;
+    for (int p : hdl.file_priorities()) result.push_back(p);
+    return result;
 }
 
 } // namespace rustbridge
