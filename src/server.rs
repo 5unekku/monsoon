@@ -268,7 +268,7 @@ impl App {
                 })
             }
             Request::GetConfig => {
-                Response::Config(serde_json::to_value(&self.config).unwrap_or_default())
+                Response::Config(toml::to_string_pretty(&self.config).unwrap_or_default())
             }
             Request::SetConfig { key, value } => match self.apply_config_change(&key, &value) {
                 Ok(_) => Response::Ok,

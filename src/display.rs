@@ -29,9 +29,7 @@ pub fn print_response(response: Response) {
         Response::TorrentDetail(detail) => print_torrent_detail(&detail),
         Response::Added { id } => println!("added: {}", id),
         Response::Stats(stats) => print_stats(&stats),
-        Response::Config(config) => {
-            println!("{}", serde_json::to_string_pretty(&config).unwrap_or_default());
-        }
+        Response::Config(toml) => print!("{}", toml),
         Response::Ok => {}
         Response::Err(message) => eprintln!("error: {}", message),
     }

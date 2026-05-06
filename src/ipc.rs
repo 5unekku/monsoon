@@ -90,7 +90,7 @@ pub enum Response {
     TorrentDetail(Box<TorrentDetail>),
     Added { id: String },
     Stats(StatsInfo),
-    Config(serde_json::Value),
+    Config(String),
     Ok,
     Err(String),
 }
