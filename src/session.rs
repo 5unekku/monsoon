@@ -1,4 +1,4 @@
-use crate::bridge::ffi::{self, AlertInfo, PeerInfo, SessionStats, TorrentFile, TorrentStatus};
+use crate::bridge::ffi::{self, AlertInfo, PeerInfo, SessionStats, SessionSettings, TorrentFile, TorrentStatus};
 use anyhow::{Context, Result};
 
 const ALERT_STATUS: i32 = 0x1;
@@ -17,14 +17,12 @@ impl Session {
         let listen = format!("{}:{}", config.listen_address, config.listen_port);
         let alert_mask = ALERT_STATUS | ALERT_ERROR | ALERT_TRACKER
             | ALERT_STORAGE | ALERT_PROGRESS | ALERT_PORT_MAPPING;
+        let settings = config_to_settings(config);
         let inner = ffi::bridge_create_session(
             listen,
             alert_mask,
-            config.max_uploads,
-            config.max_connections,
-            config.download_rate_limit * 1024,
-            config.upload_rate_limit * 1024,
             format!("rustor/{}", crate::VERSION),
+            &settings,
         );
         Ok(Self { inner })
     }
@@ -78,13 +76,8 @@ impl Session {
     }
 
     pub fn apply_settings(&mut self, config: &crate::config::Config) {
-        ffi::bridge_session_apply_settings(
-            self.inner.pin_mut(),
-            config.max_uploads,
-            config.max_connections,
-            config.download_rate_limit * 1024,
-            config.upload_rate_limit * 1024,
-        );
+        let settings = config_to_settings(config);
+        ffi::bridge_session_apply_settings(self.inner.pin_mut(), &settings);
     }
 
     pub fn pop_alerts(&mut self) -> Vec<AlertInfo> {
@@ -101,46 +94,26 @@ pub struct TorrentHandle {
 }
 
 impl TorrentHandle {
-    pub fn is_valid(&self) -> bool {
-        ffi::bridge_torrent_is_valid(&self.inner)
-    }
-
-    pub fn status(&self) -> TorrentStatus {
-        ffi::bridge_get_torrent_status(&self.inner)
-    }
-
-    pub fn files(&self) -> Vec<TorrentFile> {
-        ffi::bridge_get_torrent_files(&self.inner)
-    }
-
-    pub fn peers(&self) -> Vec<PeerInfo> {
-        ffi::bridge_get_torrent_peers(&self.inner)
-    }
-
-    pub fn pause(&self) {
-        ffi::bridge_torrent_pause(&self.inner);
-    }
-
-    pub fn resume(&self) {
-        ffi::bridge_torrent_resume(&self.inner);
-    }
-
-    pub fn force_recheck(&self) {
-        ffi::bridge_torrent_force_recheck(&self.inner);
-    }
-
-    pub fn info_hash(&self) -> String {
-        ffi::bridge_info_hash_to_string(&self.inner)
-    }
+    pub fn is_valid(&self) -> bool { ffi::bridge_torrent_is_valid(&self.inner) }
+    pub fn status(&self) -> TorrentStatus { ffi::bridge_get_torrent_status(&self.inner) }
+    pub fn files(&self) -> Vec<TorrentFile> { ffi::bridge_get_torrent_files(&self.inner) }
+    pub fn peers(&self) -> Vec<PeerInfo> { ffi::bridge_get_torrent_peers(&self.inner) }
+    pub fn pause(&self) { ffi::bridge_torrent_pause(&self.inner); }
+    pub fn resume(&self) { ffi::bridge_torrent_resume(&self.inner); }
+    pub fn force_recheck(&self) { ffi::bridge_torrent_force_recheck(&self.inner); }
+    pub fn info_hash(&self) -> String { ffi::bridge_info_hash_to_string(&self.inner) }
 
     pub fn resume_data(&self) -> Vec<u8> {
         ffi::bridge_get_resume_data(&self.inner).into_bytes()
     }
 
+    // wired up but not yet exposed through the cli — reserved for per-file priority
+    #[allow(dead_code)]
     pub fn set_file_priority(&self, file_index: i32, priority: i32) {
         ffi::bridge_set_file_priority(&self.inner, file_index, priority);
     }
 
+    #[allow(dead_code)]
     pub fn file_priorities(&self) -> Vec<i32> {
         ffi::bridge_get_file_priorities(&self.inner)
     }
@@ -148,4 +121,34 @@ impl TorrentHandle {
 
 pub fn libtorrent_version() -> String {
     ffi::bridge_get_libtorrent_version()
+}
+
+fn config_to_settings(config: &crate::config::Config) -> SessionSettings {
+    let encryption_policy = match config.encryption_mode.as_str() {
+        "forced" => 0,
+        "disabled" => 2,
+        _ => 1, // "enabled" = prefer
+    };
+    SessionSettings {
+        max_uploads: config.max_uploads,
+        max_connections: config.max_connections,
+        download_rate_limit: config.download_rate_limit * 1024,
+        upload_rate_limit: config.upload_rate_limit * 1024,
+        enable_dht: config.enable_dht,
+        enable_lsd: config.enable_lsd,
+        enable_upnp: config.enable_upnp,
+        enable_natpmp: config.enable_natpmp,
+        anonymous_mode: config.anonymous_mode,
+        encryption_out_policy: encryption_policy,
+        encryption_in_policy: encryption_policy,
+        enable_incoming_utp: config.enable_incoming_utp,
+        enable_outgoing_utp: config.enable_outgoing_utp,
+        announce_to_all_trackers: config.announce_to_all_trackers,
+        announce_to_all_tiers: config.announce_to_all_tiers,
+        ssrf_mitigation: config.ssrf_mitigation,
+        validate_https_trackers: config.validate_https_tracker_certificate,
+        max_active_downloads: config.max_active_downloads,
+        max_active_uploads: config.max_active_uploads,
+        max_active_torrents: config.max_active_torrents,
+    }
 }

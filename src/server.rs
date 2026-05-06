@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -160,6 +159,17 @@ impl App {
             }
             "seed_ratio_limit" | "ratio_limit" => self.config.seed_ratio_limit = value.parse()?,
             "seed_time_limit" | "time_limit" => self.config.seed_time_limit = value.parse()?,
+            "ssrf_mitigation" => self.config.ssrf_mitigation = parse_bool(value),
+            "validate_https_tracker_certificate" | "validate_https" => {
+                self.config.validate_https_tracker_certificate = parse_bool(value);
+            }
+            "enable_incoming_utp" | "incoming_utp" => self.config.enable_incoming_utp = parse_bool(value),
+            "enable_outgoing_utp" | "outgoing_utp" => self.config.enable_outgoing_utp = parse_bool(value),
+            "announce_to_all_trackers" => self.config.announce_to_all_trackers = parse_bool(value),
+            "announce_to_all_tiers" => self.config.announce_to_all_tiers = parse_bool(value),
+            "max_active_downloads" | "active_downloads" => self.config.max_active_downloads = value.parse()?,
+            "max_active_uploads" | "active_uploads" => self.config.max_active_uploads = value.parse()?,
+            "max_active_torrents" | "active_limit" => self.config.max_active_torrents = value.parse()?,
             _ => return Err(anyhow::anyhow!("unknown config key: {}", key)),
         }
         self.session.apply_settings(&self.config);
@@ -211,7 +221,7 @@ impl App {
                                 size: file.size,
                             })
                             .collect();
-                        Response::TorrentDetail(TorrentDetail { info, peers, files })
+                        Response::TorrentDetail(Box::new(TorrentDetail { info, peers, files }))
                     }
                 }
             }

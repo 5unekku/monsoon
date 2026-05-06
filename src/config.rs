@@ -21,13 +21,35 @@ pub struct Config {
     pub enable_natpmp: bool,
     /// re-add saved torrents on daemon start
     pub auto_resume: bool,
-    /// strip identifying info from peer/tracker connections
+
+    // ─── security & privacy ──────────────────────────────────────────────
+    /// strip identifying info from peer/tracker connections (disables PEX, DHT announce)
     pub anonymous_mode: bool,
     /// protocol encryption: "enabled" (prefer), "forced" (require), "disabled"
     pub encryption_mode: String,
-    /// seed ratio limit (0.0 = unlimited)
+    /// reject tracker responses that redirect to private/local addresses
+    pub ssrf_mitigation: bool,
+    /// verify TLS certificates for HTTPS trackers
+    pub validate_https_tracker_certificate: bool,
+
+    // ─── protocol & transport ─────────────────────────────────────────────
+    pub enable_incoming_utp: bool,
+    pub enable_outgoing_utp: bool,
+
+    // ─── tracker behaviour ────────────────────────────────────────────────
+    /// announce to every tracker in the list rather than stopping at first success
+    pub announce_to_all_trackers: bool,
+    /// announce to all tiers even when a tracker in an earlier tier succeeds
+    pub announce_to_all_tiers: bool,
+
+    // ─── active torrent limits ────────────────────────────────────────────
+    pub max_active_downloads: i32,
+    pub max_active_uploads: i32,
+    pub max_active_torrents: i32,
+
+    // ─── seeding goals (0 = unlimited) ───────────────────────────────────
     pub seed_ratio_limit: f64,
-    /// seed time limit in minutes (0 = unlimited)
+    /// stop seeding after this many minutes (0 = unlimited)
     pub seed_time_limit: i32,
 }
 
@@ -52,6 +74,15 @@ impl Default for Config {
             auto_resume: true,
             anonymous_mode: false,
             encryption_mode: "enabled".to_string(),
+            ssrf_mitigation: true,
+            validate_https_tracker_certificate: true,
+            enable_incoming_utp: true,
+            enable_outgoing_utp: true,
+            announce_to_all_trackers: false,
+            announce_to_all_tiers: true,
+            max_active_downloads: 3,
+            max_active_uploads: 5,
+            max_active_torrents: 8,
             seed_ratio_limit: 0.0,
             seed_time_limit: 0,
         }

@@ -1,3 +1,6 @@
+// project style uses parens in if/while conditions by convention
+#![allow(unused_parens)]
+
 mod bridge;
 mod client;
 mod config;
@@ -166,7 +169,7 @@ fn run_service_command(action: ServiceAction) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn install_service() -> Result<()> {
     use anyhow::Context;
-    use std::path::PathBuf;
+
 
     let binary = std::env::current_exe().context("locate binary path")?;
     let unit_dir = dirs_for_systemd()?;

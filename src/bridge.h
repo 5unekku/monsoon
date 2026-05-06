@@ -25,39 +25,26 @@
 #include <vector>
 #include <cstdint>
 
-// The cxx bridge namespace is "rustbridge"
-// All opaque types and functions must be in this namespace
 namespace rustbridge {
     using session = lt::session;
     using torrent_handle = lt::torrent_handle;
 
-    // Forward declarations of shared structs (defined by cxx in generated code)
     struct TorrentStatus;
     struct AlertInfo;
     struct PeerInfo;
     struct TorrentFile;
     struct SessionStats;
+    struct SessionSettings;
 
-    // Session management
     std::unique_ptr<session> bridge_create_session(
         rust::String listen_interfaces,
         int32_t alert_mask,
-        int32_t max_uploads,
-        int32_t max_connections,
-        int32_t download_rate_limit,
-        int32_t upload_rate_limit,
-        rust::String user_agent
+        rust::String user_agent,
+        const SessionSettings &settings
     );
 
-    void bridge_session_apply_settings(
-        session &ses,
-        int32_t max_uploads,
-        int32_t max_connections,
-        int32_t download_rate_limit,
-        int32_t upload_rate_limit
-    );
+    void bridge_session_apply_settings(session &ses, const SessionSettings &settings);
 
-    // Torrent management
     std::unique_ptr<torrent_handle> bridge_add_torrent_magnet(
         session &ses,
         rust::Str magnet_uri,
@@ -79,8 +66,6 @@ namespace rustbridge {
     );
 
     void bridge_remove_torrent(session &ses, const torrent_handle &hdl, bool remove_files);
-    void bridge_pause_torrent(const torrent_handle &hdl);
-    void bridge_resume_torrent(const torrent_handle &hdl);
     void bridge_torrent_force_recheck(const torrent_handle &hdl);
     void bridge_torrent_pause(const torrent_handle &hdl);
     void bridge_torrent_resume(const torrent_handle &hdl);

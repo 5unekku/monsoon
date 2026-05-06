@@ -17,11 +17,6 @@ pub fn format_timestamp(timestamp: i64) -> String {
         .unwrap_or_else(|| "N/A".to_string())
 }
 
-pub fn format_duration(seconds: i64) -> String {
-    if (seconds <= 0) { return "N/A".to_string(); }
-    humantime::format_duration(std::time::Duration::from_secs(seconds as u64)).to_string()
-}
-
 pub fn format_progress_bar(progress: f64, width: usize) -> String {
     let filled = ((progress * width as f64).round() as usize).min(width);
     let bar = "█".repeat(filled) + &"░".repeat(width - filled);

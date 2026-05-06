@@ -3,7 +3,7 @@ use crate::ipc::{Request, Response};
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
 const SPAWN_WAIT_MS: u64 = 50;
@@ -65,7 +65,7 @@ fn spawn_daemon_quiet() -> Result<()> {
     Ok(())
 }
 
-fn wait_for_socket(socket_path: &PathBuf) -> Result<()> {
+fn wait_for_socket(socket_path: &Path) -> Result<()> {
     for _ in 0..SPAWN_MAX_RETRIES {
         std::thread::sleep(Duration::from_millis(SPAWN_WAIT_MS));
         if (socket_path.exists()) { return Ok(()); }

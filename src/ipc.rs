@@ -87,7 +87,7 @@ pub enum Request {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     TorrentList(Vec<TorrentInfo>),
-    TorrentDetail(TorrentDetail),
+    TorrentDetail(Box<TorrentDetail>),
     Added { id: String },
     Stats(StatsInfo),
     Config(serde_json::Value),

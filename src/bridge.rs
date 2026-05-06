@@ -75,6 +75,34 @@ pub mod ffi {
         pub natpmp_running: bool,
     }
 
+    /// all configurable session settings in one flat struct, passed to create and apply
+    #[derive(Debug, Clone)]
+    pub struct SessionSettings {
+        pub max_uploads: i32,
+        pub max_connections: i32,
+        /// bytes/sec (0 = unlimited)
+        pub download_rate_limit: i32,
+        /// bytes/sec (0 = unlimited)
+        pub upload_rate_limit: i32,
+        pub enable_dht: bool,
+        pub enable_lsd: bool,
+        pub enable_upnp: bool,
+        pub enable_natpmp: bool,
+        pub anonymous_mode: bool,
+        /// 0=forced, 1=enabled (prefer enc), 2=disabled
+        pub encryption_out_policy: i32,
+        pub encryption_in_policy: i32,
+        pub enable_incoming_utp: bool,
+        pub enable_outgoing_utp: bool,
+        pub announce_to_all_trackers: bool,
+        pub announce_to_all_tiers: bool,
+        pub ssrf_mitigation: bool,
+        pub validate_https_trackers: bool,
+        pub max_active_downloads: i32,
+        pub max_active_uploads: i32,
+        pub max_active_torrents: i32,
+    }
+
     // ─── Opaque C++ Types ──────────────────────────────────────────────────
 
     unsafe extern "C++" {
@@ -87,19 +115,13 @@ pub mod ffi {
         pub fn bridge_create_session(
             listen_interfaces: String,
             alert_mask: i32,
-            max_uploads: i32,
-            max_connections: i32,
-            download_rate_limit: i32,
-            upload_rate_limit: i32,
             user_agent: String,
+            settings: &SessionSettings,
         ) -> UniquePtr<session>;
 
         pub fn bridge_session_apply_settings(
             ses: Pin<&mut session>,
-            max_uploads: i32,
-            max_connections: i32,
-            download_rate_limit: i32,
-            upload_rate_limit: i32,
+            settings: &SessionSettings,
         );
 
         // Torrent management
@@ -129,8 +151,6 @@ pub mod ffi {
             remove_files: bool,
         );
 
-        pub fn bridge_pause_torrent(hdl: &torrent_handle);
-        pub fn bridge_resume_torrent(hdl: &torrent_handle);
         pub fn bridge_torrent_force_recheck(hdl: &torrent_handle);
         pub fn bridge_torrent_pause(hdl: &torrent_handle);
         pub fn bridge_torrent_resume(hdl: &torrent_handle);
@@ -158,8 +178,10 @@ pub mod ffi {
         pub fn bridge_info_hash_to_string(hdl: &torrent_handle) -> String;
         pub fn bridge_torrent_is_valid(hdl: &torrent_handle) -> bool;
 
-        // File priority
+        // per-file priority — reserved for future cli exposure
+        #[allow(dead_code)]
         pub fn bridge_set_file_priority(hdl: &torrent_handle, file_index: i32, priority: i32);
+        #[allow(dead_code)]
         pub fn bridge_get_file_priorities(hdl: &torrent_handle) -> Vec<i32>;
     }
 }
