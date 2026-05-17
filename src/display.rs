@@ -1,4 +1,4 @@
-use crate::ipc::{FileInfo, PeerInfo, Response, StatsInfo, TorrentDetail, TorrentInfo};
+use crate::ipc::{FileInfo, PeerInfo, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo};
 use chrono::DateTime;
 
 pub fn format_bytes(bytes: i64) -> String {
@@ -30,9 +30,36 @@ pub fn print_response(response: Response) {
         Response::Added { id } => println!("added: {}", id),
         Response::Stats(stats) => print_stats(&stats),
         Response::Config(toml) => print!("{}", toml),
+        Response::RenameResult { renamed, rejected } => print_rename_result(&renamed, &rejected),
+        Response::Magnet(uri) => {
+            if (uri.is_empty()) {
+                eprintln!("magnet: torrent invalid or metadata not yet downloaded");
+            } else {
+                println!("{}", uri);
+            }
+        }
         Response::Ok => {}
         Response::Err(message) => eprintln!("error: {}", message),
     }
+}
+
+fn print_rename_result(renamed: &[usize], rejected: &[(usize, String)]) {
+    if (!rejected.is_empty()) {
+        eprintln!("rename rejected — no files were renamed:");
+        for (file_index, reason) in rejected {
+            eprintln!("  file {}: {}", file_index, reason);
+        }
+        return;
+    }
+    if (renamed.is_empty()) {
+        println!("nothing to rename");
+        return;
+    }
+    println!("submitted rename for {} file(s):", renamed.len());
+    for file_index in renamed {
+        println!("  file {}", file_index);
+    }
+    println!("(libtorrent applies renames asynchronously; check daemon logs for final outcome)");
 }
 
 fn print_torrent_list(list: &[TorrentInfo]) {
@@ -80,6 +107,10 @@ fn print_torrent_detail(detail: &TorrentDetail) {
         println!("\nfiles:");
         print_files(&detail.files);
     }
+    if (!detail.trackers.is_empty()) {
+        println!("\ntrackers:");
+        print_trackers(&detail.trackers);
+    }
     if (!detail.peers.is_empty()) {
         println!("\npeers:");
         print_peers(&detail.peers);
@@ -113,13 +144,37 @@ fn print_peers(peers: &[PeerInfo]) {
 }
 
 fn print_files(files: &[FileInfo]) {
-    println!("{:<4} {:<62} {:>12}", "#", "path", "size");
+    println!("{:<4} {:<48} {:>12} {:>7} {:>4}", "#", "path", "size", "prog", "pri");
     println!("{}", "─".repeat(80));
     for file in files {
-        println!("{:<4} {:<62} {:>12}",
+        println!("{:<4} {:<48} {:>12} {:>6.1}% {:>4}",
             file.index,
-            truncate(&file.path, 61),
-            format_bytes(file.size));
+            truncate(&file.path, 47),
+            format_bytes(file.size),
+            file.progress * 100.0,
+            file.priority);
+    }
+}
+
+fn print_trackers(trackers: &[TrackerInfo]) {
+    println!("{:<4} {:<60} {:>5} {:>5}", "tier", "url", "fails", "state");
+    println!("{}", "─".repeat(80));
+    for tracker in trackers {
+        let state = if (tracker.updating) {
+            "upd"
+        } else if (tracker.fails > 0) {
+            "err"
+        } else {
+            "ok"
+        };
+        println!("{:<4} {:<60} {:>5} {:>5}",
+            tracker.tier,
+            truncate(&tracker.url, 59),
+            tracker.fails,
+            state);
+        if (!tracker.message.is_empty()) {
+            println!("     {}", tracker.message);
+        }
     }
 }
 

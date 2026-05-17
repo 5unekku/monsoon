@@ -33,6 +33,7 @@ namespace rustbridge {
     struct AlertInfo;
     struct PeerInfo;
     struct TorrentFile;
+    struct TorrentTracker;
     struct SessionStats;
     struct SessionSettings;
 
@@ -83,4 +84,26 @@ namespace rustbridge {
 
     void bridge_set_file_priority(const torrent_handle &hdl, int32_t file_index, int32_t priority);
     rust::Vec<int32_t> bridge_get_file_priorities(const torrent_handle &hdl);
+
+    // submit an async rename. libtorrent emits file_renamed_alert on success or
+    // file_rename_failed_alert on failure; both go through bridge_pop_alerts.
+    void bridge_torrent_rename_file(const torrent_handle &hdl, int32_t file_index, rust::Str new_name);
+
+    // force a tracker re-announce immediately (ignores the announce interval)
+    void bridge_torrent_force_reannounce(const torrent_handle &hdl);
+
+    // submit an async storage move. emits storage_moved_alert / storage_moved_failed_alert.
+    void bridge_torrent_move_storage(const torrent_handle &hdl, rust::Str new_save_path);
+
+    // tracker list for a torrent (one entry per tier endpoint)
+    rust::Vec<TorrentTracker> bridge_get_torrent_trackers(const torrent_handle &hdl);
+
+    // per-file completion fraction (0.0..=1.0), one entry per file in order
+    rust::Vec<float> bridge_get_file_progress(const torrent_handle &hdl);
+
+    // build a shareable magnet URI for an active torrent
+    rust::String bridge_make_magnet_uri(const torrent_handle &hdl);
+
+    // toggle the sequential_download flag at runtime (front-to-back piece order)
+    void bridge_torrent_set_sequential(const torrent_handle &hdl, bool enabled);
 }

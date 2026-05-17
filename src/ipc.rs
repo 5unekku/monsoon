@@ -46,6 +46,20 @@ pub struct FileInfo {
     pub index: usize,
     pub path: String,
     pub size: i64,
+    /// completion fraction 0.0..=1.0
+    pub progress: f32,
+    /// libtorrent priority 0..=7 (0 = don't download, 4 = normal, 7 = high)
+    pub priority: u8,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerInfo {
+    pub url: String,
+    pub tier: i32,
+    pub verified: bool,
+    pub updating: bool,
+    pub fails: i32,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -66,6 +80,7 @@ pub struct TorrentDetail {
     pub info: TorrentInfo,
     pub peers: Vec<PeerInfo>,
     pub files: Vec<FileInfo>,
+    pub trackers: Vec<TrackerInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,6 +96,24 @@ pub enum Request {
     GetConfig,
     SetConfig { key: String, value: String },
     SaveConfig,
+    /// rename a single file inside a torrent. `new_name` is the new path
+    /// relative to the torrent's save_path; may contain subdirectory components.
+    RenameFile { index: usize, file_index: usize, new_name: String },
+    /// rename a folder by rewriting the prefix of every file path that starts
+    /// with `old_prefix`. validation is atomic — if any file in the set would
+    /// fail validation, none are renamed.
+    RenameFolder { index: usize, old_prefix: String, new_prefix: String },
+    /// move the entire torrent's save directory. async — libtorrent emits
+    /// storage_moved_alert / storage_moved_failed_alert.
+    Move { index: usize, new_save_path: String },
+    /// force tracker announce immediately (bypass the regular interval)
+    Reannounce { index: usize },
+    /// set the download priority for a single file. 0 = skip, 1..=7 = normal..high.
+    SetFilePriority { index: usize, file_index: usize, priority: u8 },
+    /// build a shareable magnet URI for the active torrent
+    Magnet { index: usize },
+    /// toggle the sequential-download flag (front-to-back piece order)
+    SetSequential { index: usize, enabled: bool },
     Shutdown,
 }
 
@@ -91,6 +124,13 @@ pub enum Response {
     Added { id: String },
     Stats(StatsInfo),
     Config(String),
+    /// rename outcome. `renamed` are file indices that passed validation and
+    /// were submitted to libtorrent; the final filesystem outcome arrives via
+    /// alerts and is logged by the daemon. `rejected` are paths that failed
+    /// pre-flight validation, paired with the human-readable reason.
+    RenameResult { renamed: Vec<usize>, rejected: Vec<(usize, String)> },
+    /// magnet URI for a torrent (empty string when invalid or not yet ready)
+    Magnet(String),
     Ok,
     Err(String),
 }

@@ -8,6 +8,7 @@ mod display;
 mod ipc;
 mod server;
 mod session;
+mod tui;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -23,11 +24,14 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Subcommand)]
 enum Commands {
+    /// launch the interactive terminal interface (default when no subcommand)
+    Tui,
+
     /// run the daemon in the foreground (for systemd or manual use)
     Daemon {
         /// suppress all log output (used when auto-spawned by cli commands)
@@ -93,6 +97,65 @@ enum Commands {
         value: String,
     },
 
+    /// rename a single file inside a torrent
+    Rename {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// file index from `rustor info <index>`
+        file_index: usize,
+        /// new path, relative to the torrent's save_path (subdirs allowed)
+        new_name: String,
+    },
+
+    /// rename a folder inside a torrent by rewriting every file path prefix
+    #[command(name = "rename-folder")]
+    RenameFolder {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// current folder path prefix (e.g. "Show.Name.S01")
+        old_prefix: String,
+        /// new folder path prefix
+        new_prefix: String,
+    },
+
+    /// move a torrent's save directory (libtorrent moves the files on disk)
+    Move {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// absolute path to the new save directory
+        new_save_path: String,
+    },
+
+    /// force a tracker re-announce immediately
+    Reannounce {
+        /// torrent index from `rustor list`
+        index: usize,
+    },
+
+    /// set the download priority for a single file (0 = skip, 4 = normal, 7 = high)
+    Priority {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// file index from `rustor info <index>`
+        file_index: usize,
+        /// priority 0..=7
+        priority: u8,
+    },
+
+    /// print a shareable magnet URI for the torrent
+    Magnet {
+        /// torrent index from `rustor list`
+        index: usize,
+    },
+
+    /// toggle sequential download (front-to-back piece order, good for streaming)
+    Sequential {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// "on" or "off"
+        enabled: String,
+    },
+
     /// stop the daemon
     Stop,
 
@@ -121,9 +184,10 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Daemon { quiet } => server::run(quiet),
-        Commands::Service { action } => run_service_command(action),
-        command => {
+        None | Some(Commands::Tui) => tui::run(),
+        Some(Commands::Daemon { quiet }) => server::run(quiet),
+        Some(Commands::Service { action }) => run_service_command(action),
+        Some(command) => {
             let request = command_to_request(command);
             let response = client::send(request)?;
             display::print_response(response);
@@ -144,8 +208,24 @@ fn command_to_request(command: Commands) -> Request {
         Commands::Stats => Request::Stats,
         Commands::Config => Request::GetConfig,
         Commands::Set { key, value } => Request::SetConfig { key, value },
+        Commands::Rename { index, file_index, new_name } => {
+            Request::RenameFile { index, file_index, new_name }
+        }
+        Commands::RenameFolder { index, old_prefix, new_prefix } => {
+            Request::RenameFolder { index, old_prefix, new_prefix }
+        }
+        Commands::Move { index, new_save_path } => Request::Move { index, new_save_path },
+        Commands::Reannounce { index } => Request::Reannounce { index },
+        Commands::Priority { index, file_index, priority } => {
+            Request::SetFilePriority { index, file_index, priority }
+        }
+        Commands::Magnet { index } => Request::Magnet { index },
+        Commands::Sequential { index, enabled } => Request::SetSequential {
+            index,
+            enabled: matches!(enabled.as_str(), "on" | "true" | "1" | "yes"),
+        },
         Commands::Stop => Request::Shutdown,
-        Commands::Daemon { .. } | Commands::Service { .. } => unreachable!(),
+        Commands::Daemon { .. } | Commands::Service { .. } | Commands::Tui => unreachable!(),
     }
 }
 
@@ -159,7 +239,9 @@ fn run_service_command(action: ServiceAction) -> Result<()> {
         match action {
             ServiceAction::Install => install_service(),
             ServiceAction::Uninstall => uninstall_service(),
-            ServiceAction::Status => run_systemctl(&["--user", "status", "rustor"]),
+            // systemctl status returns 3 when the unit is inactive; that's not an
+            // error from the user's perspective. forward the output as-is.
+            ServiceAction::Status => run_systemctl_status(&["--user", "status", "rustor"]),
             ServiceAction::Enable => run_systemctl(&["--user", "enable", "rustor"]),
             ServiceAction::Disable => run_systemctl(&["--user", "disable", "rustor"]),
         }
@@ -214,11 +296,9 @@ fn uninstall_service() -> Result<()> {
 
 #[cfg(target_os = "linux")]
 fn dirs_for_systemd() -> anyhow::Result<std::path::PathBuf> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    Ok(std::path::PathBuf::from(home)
-        .join(".config")
-        .join("systemd")
-        .join("user"))
+    let base_dirs = directories::BaseDirs::new()
+        .ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
+    Ok(base_dirs.config_dir().join("systemd").join("user"))
 }
 
 #[cfg(target_os = "linux")]
@@ -230,5 +310,16 @@ fn run_systemctl(args: &[&str]) -> anyhow::Result<()> {
     if (!status.success()) {
         anyhow::bail!("systemctl exited with {}", status);
     }
+    Ok(())
+}
+
+/// systemctl status convention: exit 0 = active, 3 = inactive, 4 = no such unit.
+/// none of these are errors for our caller — we just want the output shown.
+#[cfg(target_os = "linux")]
+fn run_systemctl_status(args: &[&str]) -> anyhow::Result<()> {
+    let _ = std::process::Command::new("systemctl")
+        .args(args)
+        .status()
+        .map_err(|error| anyhow::anyhow!("systemctl: {}", error))?;
     Ok(())
 }

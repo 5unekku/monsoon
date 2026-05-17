@@ -1,4 +1,7 @@
-use crate::bridge::ffi::{self, AlertInfo, PeerInfo, SessionStats, SessionSettings, TorrentFile, TorrentStatus};
+use crate::bridge::ffi::{
+    self, AlertInfo, PeerInfo, SessionSettings, SessionStats, TorrentFile, TorrentStatus,
+    TorrentTracker,
+};
 use anyhow::{Context, Result};
 
 const ALERT_STATUS: i32 = 0x1;
@@ -101,15 +104,43 @@ impl TorrentHandle {
         ffi::bridge_get_resume_data(&self.inner)
     }
 
-    // wired up but not yet exposed through the cli — reserved for per-file priority
-    #[allow(dead_code)]
     pub fn set_file_priority(&self, file_index: i32, priority: i32) {
         ffi::bridge_set_file_priority(&self.inner, file_index, priority);
     }
 
-    #[allow(dead_code)]
     pub fn file_priorities(&self) -> Vec<i32> {
         ffi::bridge_get_file_priorities(&self.inner)
+    }
+
+    pub fn file_progress(&self) -> Vec<f32> {
+        ffi::bridge_get_file_progress(&self.inner)
+    }
+
+    pub fn trackers(&self) -> Vec<TorrentTracker> {
+        ffi::bridge_get_torrent_trackers(&self.inner)
+    }
+
+    /// submit an async rename. validate the name first via [`validate_rename_name`]
+    /// in the server layer — this call itself does not check anything.
+    pub fn rename_file(&self, file_index: i32, new_name: &str) {
+        ffi::bridge_torrent_rename_file(&self.inner, file_index, new_name);
+    }
+
+    pub fn force_reannounce(&self) {
+        ffi::bridge_torrent_force_reannounce(&self.inner);
+    }
+
+    /// submit an async move-storage. validate the path before calling.
+    pub fn move_storage(&self, new_save_path: &str) {
+        ffi::bridge_torrent_move_storage(&self.inner, new_save_path);
+    }
+
+    pub fn magnet_uri(&self) -> String {
+        ffi::bridge_make_magnet_uri(&self.inner)
+    }
+
+    pub fn set_sequential(&self, enabled: bool) {
+        ffi::bridge_torrent_set_sequential(&self.inner, enabled);
     }
 }
 
@@ -144,5 +175,7 @@ fn config_to_settings(config: &crate::config::Config) -> SessionSettings {
         max_active_downloads: config.max_active_downloads,
         max_active_uploads: config.max_active_uploads,
         max_active_torrents: config.max_active_torrents,
+        seed_ratio_limit: config.seed_ratio_limit,
+        seed_time_limit: config.seed_time_limit,
     }
 }

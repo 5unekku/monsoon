@@ -40,6 +40,12 @@ static void apply_settings_pack(lt::settings_pack &pack, const SessionSettings &
     pack.set_int(lt::settings_pack::active_downloads, s.max_active_downloads);
     pack.set_int(lt::settings_pack::active_seeds, s.max_active_uploads);
     pack.set_int(lt::settings_pack::active_limit, s.max_active_torrents);
+
+    // libtorrent expresses ratio as integer * 100 (so 1.5 → 150). 0 disables.
+    pack.set_int(lt::settings_pack::share_ratio_limit,
+        static_cast<int>(s.seed_ratio_limit * 100.0));
+    // libtorrent seed_time_limit is in seconds; we accept minutes for ergonomics
+    pack.set_int(lt::settings_pack::seed_time_limit, s.seed_time_limit * 60);
 }
 
 // return best available info hash as a hex string (v1 preferred, v2 fallback)
@@ -312,6 +318,9 @@ rustbridge::SessionStats bridge_get_session_stats(const lt::session &ses) {
     ss.total_upload = st.total_upload;
     ss.total_dht_nodes = st.dht_nodes;
     ss.num_peers = st.num_peers;
+    // dht/lsd/upnp/natpmp running flags are deliberately not populated —
+    // they were dead-read everywhere and would need to come from listen_succeeded
+    // / dht_bootstrap alerts instead. add back if a consumer materializes.
     return ss;
 }
 
@@ -351,6 +360,83 @@ rust::Vec<int32_t> bridge_get_file_priorities(const lt::torrent_handle &hdl) {
     rust::Vec<int32_t> result;
     if (!hdl.is_valid()) return result;
     for (int p : hdl.file_priorities()) result.push_back(p);
+    return result;
+}
+
+// ─── Rename ────────────────────────────────────────────────────────────────
+// the actual outcome (file_renamed_alert or file_rename_failed_alert) is
+// surfaced asynchronously through bridge_pop_alerts.
+
+void bridge_torrent_rename_file(const lt::torrent_handle &hdl, int32_t file_index, rust::Str new_name) {
+    if (!hdl.is_valid()) return;
+    hdl.rename_file(lt::file_index_t{file_index}, std::string(new_name));
+}
+
+// ─── Reannounce / Move / Trackers / File Progress ──────────────────────────
+
+void bridge_torrent_force_reannounce(const lt::torrent_handle &hdl) {
+    if (!hdl.is_valid()) return;
+    // 0s delay, all tiers; libtorrent rate-limits internally
+    hdl.force_reannounce();
+}
+
+void bridge_torrent_move_storage(const lt::torrent_handle &hdl, rust::Str new_save_path) {
+    if (!hdl.is_valid()) return;
+    hdl.move_storage(std::string(new_save_path));
+}
+
+rust::Vec<rustbridge::TorrentTracker> bridge_get_torrent_trackers(const lt::torrent_handle &hdl) {
+    rust::Vec<rustbridge::TorrentTracker> trackers;
+    if (!hdl.is_valid()) return trackers;
+    for (auto const &announce : hdl.trackers()) {
+        rustbridge::TorrentTracker tracker;
+        tracker.url = rust::String(announce.url.c_str());
+        tracker.tier = static_cast<int32_t>(announce.tier);
+        tracker.verified = announce.verified;
+        // updating / fails / message are per-endpoint — surface the worst across endpoints
+        bool any_updating = false;
+        int worst_fails = 0;
+        std::string worst_message;
+        for (auto const &endpoint : announce.endpoints) {
+            for (auto const &info : endpoint.info_hashes) {
+                if (info.updating) any_updating = true;
+                if (info.fails > worst_fails) worst_fails = info.fails;
+                if (!info.last_error.message().empty() && worst_message.empty())
+                    worst_message = info.last_error.message();
+            }
+        }
+        tracker.updating = any_updating;
+        tracker.fails = worst_fails;
+        tracker.message = rust::String(worst_message.c_str());
+        trackers.push_back(std::move(tracker));
+    }
+    return trackers;
+}
+
+rust::String bridge_make_magnet_uri(const lt::torrent_handle &hdl) {
+    if (!hdl.is_valid()) return rust::String("");
+    return rust::String(lt::make_magnet_uri(hdl).c_str());
+}
+
+void bridge_torrent_set_sequential(const lt::torrent_handle &hdl, bool enabled) {
+    if (!hdl.is_valid()) return;
+    if (enabled) hdl.set_flags(lt::torrent_flags::sequential_download);
+    else hdl.unset_flags(lt::torrent_flags::sequential_download);
+}
+
+rust::Vec<float> bridge_get_file_progress(const lt::torrent_handle &hdl) {
+    rust::Vec<float> result;
+    if (!hdl.is_valid()) return result;
+    auto ti = hdl.torrent_file();
+    if (!ti) return result;
+    std::vector<int64_t> bytes;
+    hdl.file_progress(bytes, lt::torrent_handle::piece_granularity);
+    auto &fs = ti->files();
+    for (size_t i = 0; i < bytes.size(); ++i) {
+        int64_t total = fs.file_size(static_cast<lt::file_index_t>(static_cast<int>(i)));
+        float fraction = total > 0 ? static_cast<float>(bytes[i]) / static_cast<float>(total) : 0.0f;
+        result.push_back(fraction);
+    }
     return result;
 }
 

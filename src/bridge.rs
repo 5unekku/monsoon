@@ -59,20 +59,28 @@ pub mod ffi {
     }
 
     #[derive(Debug, Clone)]
+    pub struct TorrentTracker {
+        pub url: String,
+        pub tier: i32,
+        pub verified: bool,
+        pub updating: bool,
+        pub fails: i32,
+        /// libtorrent message for the last failure (empty when ok)
+        pub message: String,
+    }
+
+    /// session-wide counters from libtorrent. counts of torrents are computed
+    /// in the server layer from `App::torrents`, not from libtorrent, so the
+    /// per-state torrent counts and the dht/lsd/upnp/natpmp running flags are
+    /// deliberately omitted here.
+    #[derive(Debug, Clone)]
     pub struct SessionStats {
         pub total_download: i64,
         pub total_upload: i64,
         pub download_rate: i64,
         pub upload_rate: i64,
-        pub num_torrents: i32,
-        pub active_torrents: i32,
-        pub paused_torrents: i32,
         pub total_dht_nodes: i64,
         pub num_peers: i32,
-        pub dht_running: bool,
-        pub lsd_running: bool,
-        pub upnp_running: bool,
-        pub natpmp_running: bool,
     }
 
     /// all configurable session settings in one flat struct, passed to create and apply
@@ -101,6 +109,10 @@ pub mod ffi {
         pub max_active_downloads: i32,
         pub max_active_uploads: i32,
         pub max_active_torrents: i32,
+        /// stop seeding above this ratio. 0.0 = unlimited.
+        pub seed_ratio_limit: f64,
+        /// stop seeding after this many minutes. 0 = unlimited.
+        pub seed_time_limit: i32,
     }
 
     // ─── Opaque C++ Types ──────────────────────────────────────────────────
@@ -183,5 +195,26 @@ pub mod ffi {
         pub fn bridge_set_file_priority(hdl: &torrent_handle, file_index: i32, priority: i32);
         #[allow(dead_code)]
         pub fn bridge_get_file_priorities(hdl: &torrent_handle) -> Vec<i32>;
+
+        // rename a single file inside a torrent. async — outcome arrives through alerts.
+        pub fn bridge_torrent_rename_file(hdl: &torrent_handle, file_index: i32, new_name: &str);
+
+        // force an immediate tracker announce, bypassing the regular interval.
+        pub fn bridge_torrent_force_reannounce(hdl: &torrent_handle);
+
+        // submit an async move-storage. emits storage_moved_alert / storage_moved_failed_alert.
+        pub fn bridge_torrent_move_storage(hdl: &torrent_handle, new_save_path: &str);
+
+        // per-torrent tracker list (one row per tier/url)
+        pub fn bridge_get_torrent_trackers(hdl: &torrent_handle) -> Vec<TorrentTracker>;
+
+        // per-file completion fraction (0.0..=1.0), order matches bridge_get_torrent_files
+        pub fn bridge_get_file_progress(hdl: &torrent_handle) -> Vec<f32>;
+
+        // shareable magnet URI for an active torrent (empty when invalid)
+        pub fn bridge_make_magnet_uri(hdl: &torrent_handle) -> String;
+
+        // toggle the sequential_download flag at runtime
+        pub fn bridge_torrent_set_sequential(hdl: &torrent_handle, enabled: bool);
     }
 }
