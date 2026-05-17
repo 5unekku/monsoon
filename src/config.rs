@@ -52,6 +52,39 @@ pub struct Config {
     /// stop seeding after this many minutes (0 = unlimited)
     pub seed_time_limit: i32,
 
+    // ─── proxy / anonymity network ────────────────────────────────────────
+    /// proxy type: "none", "socks4", "socks5", "socks5_pw", "http",
+    /// "http_pw", "i2p". when set to anything but "none", the daemon will
+    /// probe the proxy at startup and refuse to start if unreachable.
+    #[serde(default = "default_proxy_type")]
+    pub proxy_type: String,
+    #[serde(default)]
+    pub proxy_host: String,
+    #[serde(default)]
+    pub proxy_port: u16,
+    #[serde(default)]
+    pub proxy_username: String,
+    #[serde(default)]
+    pub proxy_password: String,
+    /// proxy peer-to-peer connections (not just tracker traffic)
+    #[serde(default = "default_true")]
+    pub proxy_peer_connections: bool,
+    /// proxy tracker (announce/scrape) connections
+    #[serde(default = "default_true")]
+    pub proxy_tracker_connections: bool,
+
+    // ─── ip filter ─────────────────────────────────────────────────────────
+    /// local path to an ip filter (PeerGuardian P2P format or CIDR lines).
+    /// loaded on every daemon start.
+    #[serde(default)]
+    pub ip_filter_path: String,
+    /// optional URL fetched at startup (and refreshed every refresh interval)
+    /// and stored at ip_filter_path. unsafe TLS cert validation is never done.
+    #[serde(default)]
+    pub ip_filter_url: String,
+    #[serde(default = "default_ip_filter_refresh_hours")]
+    pub ip_filter_refresh_hours: u64,
+
     // ─── automation ───────────────────────────────────────────────────────
     /// directories scanned every ~5s for new .torrent files. matches are
     /// auto-added and the file is renamed `.loaded` to prevent re-adding.
@@ -80,6 +113,9 @@ pub struct Config {
 fn default_completion_script_timeout() -> u64 { 60 }
 fn default_tui_sidebar_width() -> u16 { 22 }
 fn default_tui_detail_split_percent() -> u16 { 40 }
+fn default_proxy_type() -> String { "none".to_string() }
+fn default_true() -> bool { true }
+fn default_ip_filter_refresh_hours() -> u64 { 24 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -113,6 +149,16 @@ impl Default for Config {
             max_active_torrents: 8,
             seed_ratio_limit: 0.0,
             seed_time_limit: 0,
+            proxy_type: default_proxy_type(),
+            proxy_host: String::new(),
+            proxy_port: 0,
+            proxy_username: String::new(),
+            proxy_password: String::new(),
+            proxy_peer_connections: true,
+            proxy_tracker_connections: true,
+            ip_filter_path: String::new(),
+            ip_filter_url: String::new(),
+            ip_filter_refresh_hours: default_ip_filter_refresh_hours(),
             watch_directories: Vec::new(),
             completion_script: None,
             completion_script_timeout_seconds: default_completion_script_timeout(),

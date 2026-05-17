@@ -84,6 +84,17 @@ impl Session {
     pub fn stats(&self) -> SessionStats {
         ffi::bridge_get_session_stats(&self.inner)
     }
+
+    /// load an ip filter from a path on disk. returns the number of rules
+    /// loaded, or -1 if the file couldn't be opened. an empty file (0 rules)
+    /// is treated as "do not install a filter."
+    pub fn load_ip_filter(&mut self, path: &str) -> i32 {
+        ffi::bridge_session_load_ip_filter(self.inner.pin_mut(), path)
+    }
+
+    pub fn clear_ip_filter(&mut self) {
+        ffi::bridge_session_clear_ip_filter(self.inner.pin_mut());
+    }
 }
 
 pub struct TorrentHandle {
@@ -142,6 +153,10 @@ impl TorrentHandle {
     pub fn set_sequential(&self, enabled: bool) {
         ffi::bridge_torrent_set_sequential(&self.inner, enabled);
     }
+
+    pub fn use_interface(&self, interface: &str) {
+        ffi::bridge_torrent_use_interface(&self.inner, interface);
+    }
 }
 
 pub fn libtorrent_version() -> String {
@@ -177,5 +192,26 @@ fn config_to_settings(config: &crate::config::Config) -> SessionSettings {
         max_active_torrents: config.max_active_torrents,
         seed_ratio_limit: config.seed_ratio_limit,
         seed_time_limit: config.seed_time_limit,
+        proxy_type: proxy_type_int(&config.proxy_type),
+        proxy_hostname: config.proxy_host.clone(),
+        proxy_port: config.proxy_port as i32,
+        proxy_username: config.proxy_username.clone(),
+        proxy_password: config.proxy_password.clone(),
+        proxy_peer_connections: config.proxy_peer_connections,
+        proxy_tracker_connections: config.proxy_tracker_connections,
+    }
+}
+
+/// map our config string to libtorrent's proxy_type integer. unknown values
+/// fall back to "none" — better safe than leaking over a misconfigured proxy.
+fn proxy_type_int(name: &str) -> i32 {
+    match name {
+        "socks4" => 1,
+        "socks5" => 2,
+        "socks5_pw" => 3,
+        "http" => 4,
+        "http_pw" => 5,
+        "i2p" => 6,
+        _ => 0,
     }
 }

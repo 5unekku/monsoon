@@ -113,6 +113,17 @@ pub mod ffi {
         pub seed_ratio_limit: f64,
         /// stop seeding after this many minutes. 0 = unlimited.
         pub seed_time_limit: i32,
+
+        // ─── proxy ──────────────────────────────────────────────────────
+        /// libtorrent proxy_type: 0=none, 1=socks4, 2=socks5, 3=socks5_pw,
+        /// 4=http, 5=http_pw, 6=i2p_proxy
+        pub proxy_type: i32,
+        pub proxy_hostname: String,
+        pub proxy_port: i32,
+        pub proxy_username: String,
+        pub proxy_password: String,
+        pub proxy_peer_connections: bool,
+        pub proxy_tracker_connections: bool,
     }
 
     // ─── Opaque C++ Types ──────────────────────────────────────────────────
@@ -216,5 +227,17 @@ pub mod ffi {
 
         // toggle the sequential_download flag at runtime
         pub fn bridge_torrent_set_sequential(hdl: &torrent_handle, enabled: bool);
+
+        /// bind this torrent's outgoing connections to a specific interface
+        /// (e.g. "tun0" or an ip). pass empty to clear and use the session default.
+        pub fn bridge_torrent_use_interface(hdl: &torrent_handle, interface: &str);
+
+        /// load an ip filter file in PeerGuardian/eMule "name:start-end" format
+        /// (CIDR lines are also accepted). returns the number of rules loaded,
+        /// or -1 on parse error.
+        pub fn bridge_session_load_ip_filter(ses: Pin<&mut session>, path: &str) -> i32;
+
+        /// clear any active ip filter
+        pub fn bridge_session_clear_ip_filter(ses: Pin<&mut session>);
     }
 }

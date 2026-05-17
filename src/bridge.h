@@ -19,6 +19,7 @@
 #include <libtorrent/peer_info.hpp>
 #include <libtorrent/settings_pack.hpp>
 #include <libtorrent/error_code.hpp>
+#include <libtorrent/ip_filter.hpp>
 
 #include <memory>
 #include <string>
@@ -106,4 +107,11 @@ namespace rustbridge {
 
     // toggle the sequential_download flag at runtime (front-to-back piece order)
     void bridge_torrent_set_sequential(const torrent_handle &hdl, bool enabled);
+
+    // bind this torrent's outgoing connections to a specific interface
+    void bridge_torrent_use_interface(const torrent_handle &hdl, rust::Str interface);
+
+    // load an ip filter from disk. returns rules-loaded count, or -1 on error.
+    int32_t bridge_session_load_ip_filter(session &ses, rust::Str path);
+    void bridge_session_clear_ip_filter(session &ses);
 }

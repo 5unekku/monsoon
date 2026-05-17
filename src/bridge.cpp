@@ -1,6 +1,7 @@
 #include "bridge.h"
 #include "rustor/src/bridge.rs.h"
 
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 
@@ -46,6 +47,15 @@ static void apply_settings_pack(lt::settings_pack &pack, const SessionSettings &
         static_cast<int>(s.seed_ratio_limit * 100.0));
     // libtorrent seed_time_limit is in seconds; we accept minutes for ergonomics
     pack.set_int(lt::settings_pack::seed_time_limit, s.seed_time_limit * 60);
+
+    // proxy. type 0 is "none" — settings_pack still requires the field to be set.
+    pack.set_int(lt::settings_pack::proxy_type, s.proxy_type);
+    pack.set_str(lt::settings_pack::proxy_hostname, std::string(s.proxy_hostname));
+    pack.set_int(lt::settings_pack::proxy_port, s.proxy_port);
+    pack.set_str(lt::settings_pack::proxy_username, std::string(s.proxy_username));
+    pack.set_str(lt::settings_pack::proxy_password, std::string(s.proxy_password));
+    pack.set_bool(lt::settings_pack::proxy_peer_connections, s.proxy_peer_connections);
+    pack.set_bool(lt::settings_pack::proxy_tracker_connections, s.proxy_tracker_connections);
 }
 
 // return best available info hash as a hex string (v1 preferred, v2 fallback)
@@ -422,6 +432,61 @@ void bridge_torrent_set_sequential(const lt::torrent_handle &hdl, bool enabled) 
     if (!hdl.is_valid()) return;
     if (enabled) hdl.set_flags(lt::torrent_flags::sequential_download);
     else hdl.unset_flags(lt::torrent_flags::sequential_download);
+}
+
+void bridge_torrent_use_interface(const lt::torrent_handle &hdl, rust::Str interface) {
+    if (!hdl.is_valid()) return;
+    // libtorrent expects a comma-separated list, empty clears the per-torrent override
+    hdl.use_interface(std::string(interface).c_str());
+}
+
+// ─── ip filter ─────────────────────────────────────────────────────────────
+// supports both PeerGuardian P2P "name:start-end" lines and plain CIDR/range
+// lines. blank lines and lines starting with '#' or ';' are ignored.
+
+static bool parse_address(const std::string &text, lt::address &out) {
+    lt::error_code ec;
+    out = lt::make_address(text, ec);
+    return !ec;
+}
+
+int32_t bridge_session_load_ip_filter(lt::session &ses, rust::Str path) {
+    std::ifstream file(std::string(path).c_str());
+    if (!file.is_open()) return -1;
+    lt::ip_filter filter;
+    int count = 0;
+    std::string line;
+    while (std::getline(file, line)) {
+        if (line.empty() || line[0] == '#' || line[0] == ';') continue;
+        // strip CR if any (CRLF files)
+        if (line.back() == '\r') line.pop_back();
+        // PeerGuardian: name:start-end
+        auto colon = line.rfind(':');
+        std::string range = (colon != std::string::npos) ? line.substr(colon + 1) : line;
+        auto dash = range.find('-');
+        if (dash == std::string::npos) continue;
+        std::string start_str = range.substr(0, dash);
+        std::string end_str = range.substr(dash + 1);
+        // trim whitespace
+        auto trim = [](std::string &s) {
+            while (!s.empty() && (s.front() == ' ' || s.front() == '\t')) s.erase(s.begin());
+            while (!s.empty() && (s.back() == ' ' || s.back() == '\t')) s.pop_back();
+        };
+        trim(start_str);
+        trim(end_str);
+        lt::address start_addr;
+        lt::address end_addr;
+        if (!parse_address(start_str, start_addr)) continue;
+        if (!parse_address(end_str, end_addr)) continue;
+        filter.add_rule(start_addr, end_addr, lt::ip_filter::blocked);
+        ++count;
+    }
+    if (count > 0) ses.set_ip_filter(std::move(filter));
+    return count;
+}
+
+void bridge_session_clear_ip_filter(lt::session &ses) {
+    ses.set_ip_filter(lt::ip_filter());
 }
 
 rust::Vec<float> bridge_get_file_progress(const lt::torrent_handle &hdl) {

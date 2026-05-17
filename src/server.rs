@@ -25,6 +25,8 @@ struct ManagedTorrent {
     info_hash: String,
     tags: BTreeSet<String>,
     category: Option<String>,
+    /// per-torrent network interface override (e.g. "tun0"). None = use session default.
+    interface_override: Option<String>,
     /// set when the torrent first transitions to "finished" so
     /// completion_script does not fire twice
     was_finished: bool,
@@ -41,6 +43,8 @@ struct TorrentRecord {
     tags: BTreeSet<String>,
     #[serde(default)]
     category: Option<String>,
+    #[serde(default)]
+    interface_override: Option<String>,
 }
 
 pub struct App {
@@ -81,6 +85,9 @@ impl App {
 
             match result {
                 Ok(handle) => {
+                    if let Some(interface) = record.interface_override.as_deref() {
+                        handle.use_interface(interface);
+                    }
                     let info_hash = handle.info_hash();
                     self.torrents.push(ManagedTorrent {
                         handle,
@@ -90,6 +97,7 @@ impl App {
                         info_hash,
                         tags: record.tags,
                         category: record.category,
+                        interface_override: record.interface_override,
                         was_finished: false,
                     });
                 }
@@ -107,6 +115,7 @@ impl App {
             save_path: torrent.save_path.clone(),
             tags: torrent.tags.clone(),
             category: torrent.category.clone(),
+            interface_override: torrent.interface_override.clone(),
         }).collect();
         if let Ok(list_path) = Config::torrent_list_path() {
             if let Ok(json) = serde_json::to_string(&records) {
@@ -158,6 +167,7 @@ impl App {
             info_hash: info_hash.clone(),
             tags,
             category: category.map(str::to_string),
+            interface_override: None,
             was_finished: false,
         });
         self.persist_torrent_list();
@@ -184,6 +194,7 @@ impl App {
             info_hash: info_hash.clone(),
             tags,
             category: category.map(str::to_string),
+            interface_override: None,
             was_finished: false,
         });
         self.persist_torrent_list();
@@ -486,6 +497,24 @@ impl App {
         Ok(Response::RenameResult { renamed, rejected })
     }
 
+    /// load an ip filter (PeerGuardian or CIDR) from disk if configured.
+    /// non-fatal — startup proceeds without filtering if the file is missing
+    /// or malformed (the bridge logs the count).
+    pub fn install_ip_filter(&mut self) {
+        let path = self.config.ip_filter_path.clone();
+        if (path.trim().is_empty()) { return; }
+        if (!std::path::Path::new(&path).exists()) {
+            tracing::warn!(path = %path, "ip filter file missing");
+            return;
+        }
+        let count = self.session.load_ip_filter(&path);
+        if (count < 0) {
+            tracing::warn!(path = %path, "ip filter could not be parsed");
+        } else {
+            tracing::info!(path = %path, rules = count, "ip filter loaded");
+        }
+    }
+
     /// scan each watch directory for new .torrent files. matches are auto-added
     /// and the source file is renamed `.loaded.torrent` so the next scan ignores it.
     /// silent on directories that don't exist — operators may symlink them in later.
@@ -715,6 +744,19 @@ impl App {
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
+            Request::SetTorrentInterface { index, interface } => {
+                match self.torrents.get_mut(index) {
+                    None => Response::Err(format!("invalid index: {}", index)),
+                    Some(torrent) => {
+                        // empty string clears the override at the libtorrent level
+                        let applied = interface.clone().unwrap_or_default();
+                        torrent.handle.use_interface(&applied);
+                        torrent.interface_override = interface;
+                        self.persist_torrent_list();
+                        Response::Ok
+                    }
+                }
+            }
             Request::RemoveCategory { name } => {
                 if (self.categories.entries.remove(&name).is_some()) {
                     // null the category on any torrent that was in it
@@ -816,6 +858,25 @@ fn validate_rename_name(new_name: &str) -> Result<()> {
 /// fire a user-configured completion script with env vars describing the
 /// completed torrent. fully detached — we do not block the daemon waiting
 /// for it. a separate watchdog thread kills the process if it overruns.
+/// open a tcp connection to the proxy host:port. used as a hard-fail probe
+/// before starting the libtorrent session — if the proxy is unreachable, the
+/// daemon refuses to start rather than fall through to a direct connection.
+fn probe_proxy(host: &str, port: u16) -> Result<()> {
+    use std::net::ToSocketAddrs;
+    if (host.trim().is_empty() || port == 0) {
+        anyhow::bail!("proxy_type is set but proxy_host / proxy_port are not");
+    }
+    let address = format!("{}:{}", host, port);
+    let resolved = address.to_socket_addrs()
+        .map_err(|error| anyhow::anyhow!("resolve {}: {}", address, error))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("no addresses for {}", address))?;
+    std::net::TcpStream::connect_timeout(&resolved, Duration::from_secs(5))
+        .map_err(|error| anyhow::anyhow!("connect {}: {}", address, error))?;
+    tracing::info!(proxy = %address, "proxy reachable");
+    Ok(())
+}
+
 fn spawn_completion_script(
     script: &str,
     timeout: Duration,
@@ -934,12 +995,31 @@ pub fn run(quiet: bool) -> Result<()> {
     }
 
     let config = Config::load().context("load config")?;
-    let socket_path = Config::socket_path().context("socket path")?;
 
+    // hard-fail safety checks BEFORE binding the ipc socket so a misconfigured
+    // proxy or ip filter takes the daemon down before it can leak traffic
+    if (config.proxy_type != "none") {
+        probe_proxy(&config.proxy_host, config.proxy_port)
+            .context("proxy unreachable — refusing to start to prevent leaks")?;
+    }
+    // encryption hard-fail: when 'forced' is set, ssrf_mitigation must also be
+    // on (otherwise tracker redirects can bypass it) and the daemon should
+    // refuse to start with manifestly leaky options.
+    if (config.encryption_mode == "forced") {
+        if (!config.ssrf_mitigation) {
+            anyhow::bail!(
+                "encryption_mode = forced requires ssrf_mitigation = true \
+                 (otherwise tracker redirects to plaintext peers can bypass it)"
+            );
+        }
+    }
+
+    let socket_path = Config::socket_path().context("socket path")?;
     // remove any stale socket from a previous crash
     let _ = std::fs::remove_file(&socket_path);
 
     let mut app = App::new(config).context("create session")?;
+    app.install_ip_filter();
     if let Err(error) = app.load_torrents() {
         tracing::warn!("could not restore saved torrents: {}", error);
     }

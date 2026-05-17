@@ -175,6 +175,15 @@ enum Commands {
         action: CategoryAction,
     },
 
+    /// pin a torrent's outgoing connections to a specific network interface
+    /// (e.g. tun0 for a vpn). pass empty to clear.
+    Bind {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// interface name or ip. omit to clear the override.
+        interface: Option<String>,
+    },
+
     /// stop the daemon
     Stop,
 
@@ -270,6 +279,7 @@ fn command_to_request(command: Commands) -> Request {
             index,
             tags: tags.into_iter().collect(),
         },
+        Commands::Bind { index, interface } => Request::SetTorrentInterface { index, interface },
         Commands::Category { action } => match action {
             CategoryAction::List => Request::ListCategories,
             CategoryAction::Set { name, save_path, tag } => Request::SetCategoryDefinition {
