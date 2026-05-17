@@ -1,11 +1,14 @@
 use crate::bridge::ffi;
+use crate::categories::{Categories, Category};
 use crate::config::Config;
 use crate::ipc::{
-    FileInfo, PeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo,
+    CategoryInfo, FileInfo, PeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo,
+    TrackerInfo,
 };
 use crate::session::{Session, TorrentHandle};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{
@@ -20,6 +23,11 @@ struct ManagedTorrent {
     torrent_path: Option<String>,
     save_path: String,
     info_hash: String,
+    tags: BTreeSet<String>,
+    category: Option<String>,
+    /// set when the torrent first transitions to "finished" so
+    /// completion_script does not fire twice
+    was_finished: bool,
 }
 
 /// persisted record of a known torrent so the daemon can reload it on restart
@@ -29,18 +37,27 @@ struct TorrentRecord {
     magnet_uri: Option<String>,
     torrent_path: Option<String>,
     save_path: String,
+    #[serde(default)]
+    tags: BTreeSet<String>,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 pub struct App {
     session: Session,
     torrents: Vec<ManagedTorrent>,
     config: Config,
+    categories: Categories,
 }
 
 impl App {
     pub fn new(config: Config) -> Result<Self> {
         let session = Session::new(&config)?;
-        Ok(Self { session, torrents: Vec::new(), config })
+        let categories = Categories::load().unwrap_or_else(|error| {
+            tracing::warn!("failed to load categories.toml ({}); using empty set", error);
+            Categories::default()
+        });
+        Ok(Self { session, torrents: Vec::new(), config, categories })
     }
 
     /// load saved torrent list and resume each one with its fastresume data
@@ -71,6 +88,9 @@ impl App {
                         torrent_path: record.torrent_path,
                         save_path: record.save_path,
                         info_hash,
+                        tags: record.tags,
+                        category: record.category,
+                        was_finished: false,
                     });
                 }
                 Err(error) => tracing::warn!("failed to resume {}: {}", record.info_hash, error),
@@ -85,6 +105,8 @@ impl App {
             magnet_uri: torrent.magnet_uri.clone(),
             torrent_path: torrent.torrent_path.clone(),
             save_path: torrent.save_path.clone(),
+            tags: torrent.tags.clone(),
+            category: torrent.category.clone(),
         }).collect();
         if let Ok(list_path) = Config::torrent_list_path() {
             if let Ok(json) = serde_json::to_string(&records) {
@@ -93,34 +115,76 @@ impl App {
         }
     }
 
-    fn add_magnet(&mut self, uri: &str, save_path: Option<&str>) -> Result<String> {
-        let save_path = save_path.unwrap_or(&self.config.default_save_path);
-        let handle = self.session.add_torrent_magnet(uri, save_path, None)?;
+    /// resolve save path + auto-tags for a new torrent based on an explicit
+    /// override, an explicit category, or the default category-less behaviour.
+    fn resolve_add_target(
+        &self,
+        save_path: Option<&str>,
+        category: Option<&str>,
+    ) -> (String, BTreeSet<String>) {
+        let mut tags = BTreeSet::new();
+        let resolved_path = if let Some(path) = save_path {
+            path.to_string()
+        } else if let Some(name) = category {
+            match self.categories.get(name) {
+                Some(definition) => {
+                    for tag in &definition.add_tags {
+                        tags.insert(tag.clone());
+                    }
+                    definition.save_path.clone()
+                }
+                None => self.config.default_save_path.clone(),
+            }
+        } else {
+            self.config.default_save_path.clone()
+        };
+        (resolved_path, tags)
+    }
+
+    fn add_magnet(
+        &mut self,
+        uri: &str,
+        save_path: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<String> {
+        let (save_path, tags) = self.resolve_add_target(save_path, category);
+        let handle = self.session.add_torrent_magnet(uri, &save_path, None)?;
         let info_hash = handle.info_hash();
         self.torrents.push(ManagedTorrent {
             handle,
             magnet_uri: Some(uri.to_string()),
             torrent_path: None,
-            save_path: save_path.to_string(),
+            save_path,
             info_hash: info_hash.clone(),
+            tags,
+            category: category.map(str::to_string),
+            was_finished: false,
         });
         self.persist_torrent_list();
         Ok(info_hash)
     }
 
-    fn add_file(&mut self, file_path: &str, save_path: Option<&str>) -> Result<String> {
+    fn add_file(
+        &mut self,
+        file_path: &str,
+        save_path: Option<&str>,
+        category: Option<&str>,
+    ) -> Result<String> {
         if (!std::path::Path::new(file_path).exists()) {
             return Err(anyhow::anyhow!("file not found: {}", file_path));
         }
-        let save_path = save_path.unwrap_or(&self.config.default_save_path);
-        let handle = self.session.add_torrent_file(file_path, save_path, None)?;
+        let (save_path, tags) = self.resolve_add_target(save_path, category);
+        let handle = self.session.add_torrent_file(file_path, &save_path, None)?;
         let info_hash = handle.info_hash();
         self.torrents.push(ManagedTorrent {
             handle,
             magnet_uri: None,
             torrent_path: Some(file_path.to_string()),
-            save_path: save_path.to_string(),
+            save_path,
             info_hash: info_hash.clone(),
+            tags,
+            category: category.map(str::to_string),
+            was_finished: false,
         });
         self.persist_torrent_list();
         Ok(info_hash)
@@ -194,6 +258,48 @@ impl App {
             ));
         }
         Ok(())
+    }
+
+    /// detect torrents that have just transitioned to finished and fire the
+    /// completion_script (if configured). polled from the main loop alongside
+    /// alert processing so it picks up state changes from any source.
+    pub fn process_completion_hooks(&mut self) {
+        let script_path = match &self.config.completion_script {
+            Some(path) if !path.trim().is_empty() => path.clone(),
+            _ => {
+                // even without a script we still update was_finished so toggling
+                // the script on later doesn't fire for already-finished torrents
+                for torrent in self.torrents.iter_mut() {
+                    if (torrent.handle.status().is_finished) {
+                        torrent.was_finished = true;
+                    }
+                }
+                return;
+            }
+        };
+        let timeout = Duration::from_secs(self.config.completion_script_timeout_seconds);
+        // collect first to avoid holding &mut self across spawn
+        let mut firings: Vec<(usize, String, String, String, i64, Option<String>)> = Vec::new();
+        for (index, torrent) in self.torrents.iter_mut().enumerate() {
+            let status = torrent.handle.status();
+            if (status.is_finished && !torrent.was_finished) {
+                torrent.was_finished = true;
+                firings.push((
+                    index,
+                    status.name,
+                    torrent.info_hash.clone(),
+                    torrent.save_path.clone(),
+                    status.total_wanted,
+                    torrent.category.clone(),
+                ));
+            } else if (!status.is_finished) {
+                torrent.was_finished = false;
+            }
+        }
+        for (index, name, hash, save_path, size, category) in firings {
+            spawn_completion_script(&script_path, timeout, &name, &hash, &save_path, size, category.as_deref());
+            tracing::info!(index, name, "fired completion script");
+        }
     }
 
     pub fn process_alerts(&mut self) {
@@ -380,6 +486,49 @@ impl App {
         Ok(Response::RenameResult { renamed, rejected })
     }
 
+    /// scan each watch directory for new .torrent files. matches are auto-added
+    /// and the source file is renamed `.loaded.torrent` so the next scan ignores it.
+    /// silent on directories that don't exist — operators may symlink them in later.
+    pub fn poll_watch_dirs(&mut self) {
+        let directories = self.config.watch_directories.clone();
+        for directory in directories {
+            let path = std::path::PathBuf::from(&directory);
+            if (!path.is_dir()) { continue; }
+            let entries = match std::fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!("watch dir {}: {}", directory, error);
+                    continue;
+                }
+            };
+            for entry in entries.flatten() {
+                let entry_path = entry.path();
+                if (!entry_path.is_file()) { continue; }
+                let extension = entry_path.extension().and_then(|os| os.to_str());
+                if (extension != Some("torrent")) { continue; }
+                // ignore files we already marked loaded
+                if let Some(name) = entry_path.file_name().and_then(|os| os.to_str()) {
+                    if (name.contains(".loaded.")) { continue; }
+                }
+                let path_string = entry_path.to_string_lossy().to_string();
+                match self.add_file(&path_string, None, None) {
+                    Ok(hash) => {
+                        tracing::info!(file = %path_string, hash, "watch: added");
+                        // rename to *.loaded.torrent
+                        let loaded = entry_path.with_extension("loaded.torrent");
+                        if let Err(error) = std::fs::rename(&entry_path, &loaded) {
+                            tracing::warn!(
+                                "could not rename {} after add: {}",
+                                entry_path.display(), error
+                            );
+                        }
+                    }
+                    Err(error) => tracing::warn!("watch: add {}: {}", path_string, error),
+                }
+            }
+        }
+    }
+
     pub fn save_resume_data(&self) {
         for torrent in &self.torrents {
             if (!torrent.handle.is_valid() || !torrent.handle.status().has_metadata) { continue; }
@@ -397,7 +546,7 @@ impl App {
         match request {
             Request::List => {
                 let list = self.torrents.iter().enumerate()
-                    .map(|(index, torrent)| status_to_info(index, &torrent.handle))
+                    .map(|(index, torrent)| status_to_info(index, torrent))
                     .collect();
                 Response::TorrentList(list)
             }
@@ -405,7 +554,7 @@ impl App {
                 match self.torrents.get(index) {
                     None => Response::Err(format!("invalid index: {}", index)),
                     Some(torrent) => {
-                        let info = status_to_info(index, &torrent.handle);
+                        let info = status_to_info(index, torrent);
                         let peers = torrent.handle.peers().into_iter().map(bridge_peer_to_ipc).collect();
                         let progresses = torrent.handle.file_progress();
                         let priorities = torrent.handle.file_priorities();
@@ -432,11 +581,11 @@ impl App {
                     }
                 }
             }
-            Request::Add { uri, save_path } => {
+            Request::Add { uri, save_path, category } => {
                 let result = if (uri.starts_with("magnet:")) {
-                    self.add_magnet(&uri, save_path.as_deref())
+                    self.add_magnet(&uri, save_path.as_deref(), category.as_deref())
                 } else {
-                    self.add_file(&uri, save_path.as_deref())
+                    self.add_file(&uri, save_path.as_deref(), category.as_deref())
                 };
                 match result {
                     Ok(hash) => Response::Added { id: hash },
@@ -519,14 +668,78 @@ impl App {
                 None => Response::Err(format!("invalid index: {}", index)),
                 Some(torrent) => { torrent.handle.set_sequential(enabled); Response::Ok }
             },
+            Request::SetTags { index, tags } => match self.torrents.get_mut(index) {
+                None => Response::Err(format!("invalid index: {}", index)),
+                Some(torrent) => {
+                    torrent.tags = tags;
+                    self.persist_torrent_list();
+                    Response::Ok
+                }
+            },
+            Request::SetCategory { index, name } => {
+                if let Some(category_name) = &name {
+                    if (self.categories.get(category_name).is_none()) {
+                        return Response::Err(format!("unknown category: {}", category_name));
+                    }
+                }
+                match self.torrents.get_mut(index) {
+                    None => Response::Err(format!("invalid index: {}", index)),
+                    Some(torrent) => {
+                        torrent.category = name;
+                        self.persist_torrent_list();
+                        Response::Ok
+                    }
+                }
+            }
+            Request::ListCategories => {
+                let entries: Vec<CategoryInfo> = self.categories.entries.iter().map(|(name, definition)| {
+                    let torrent_count = self.torrents.iter()
+                        .filter(|torrent| torrent.category.as_deref() == Some(name.as_str()))
+                        .count();
+                    CategoryInfo {
+                        name: name.clone(),
+                        save_path: definition.save_path.clone(),
+                        add_tags: definition.add_tags.clone(),
+                        torrent_count,
+                    }
+                }).collect();
+                Response::Categories(entries)
+            }
+            Request::SetCategoryDefinition { name, save_path, add_tags } => {
+                if (name.trim().is_empty()) {
+                    return Response::Err("category name cannot be empty".to_string());
+                }
+                self.categories.entries.insert(name, Category { save_path, add_tags });
+                match self.categories.save() {
+                    Ok(_) => Response::Ok,
+                    Err(error) => Response::Err(error.to_string()),
+                }
+            }
+            Request::RemoveCategory { name } => {
+                if (self.categories.entries.remove(&name).is_some()) {
+                    // null the category on any torrent that was in it
+                    for torrent in self.torrents.iter_mut() {
+                        if (torrent.category.as_deref() == Some(name.as_str())) {
+                            torrent.category = None;
+                        }
+                    }
+                    self.persist_torrent_list();
+                    match self.categories.save() {
+                        Ok(_) => Response::Ok,
+                        Err(error) => Response::Err(error.to_string()),
+                    }
+                } else {
+                    Response::Err(format!("unknown category: {}", name))
+                }
+            }
             // caller checks for this before calling handle_request
             Request::Shutdown => Response::Ok,
         }
     }
 }
 
-fn status_to_info(index: usize, handle: &TorrentHandle) -> TorrentInfo {
-    let status = handle.status();
+fn status_to_info(index: usize, torrent: &ManagedTorrent) -> TorrentInfo {
+    let status = torrent.handle.status();
     TorrentInfo {
         index,
         info_hash: status.info_hash,
@@ -553,6 +766,8 @@ fn status_to_info(index: usize, handle: &TorrentHandle) -> TorrentInfo {
         is_seeding: status.is_seeding,
         has_metadata: status.has_metadata,
         error: status.error,
+        tags: torrent.tags.clone(),
+        category: torrent.category.clone(),
     }
 }
 
@@ -596,6 +811,66 @@ fn validate_rename_name(new_name: &str) -> Result<()> {
         return Err(anyhow::anyhow!("name cannot contain null bytes"));
     }
     Ok(())
+}
+
+/// fire a user-configured completion script with env vars describing the
+/// completed torrent. fully detached — we do not block the daemon waiting
+/// for it. a separate watchdog thread kills the process if it overruns.
+fn spawn_completion_script(
+    script: &str,
+    timeout: Duration,
+    name: &str,
+    hash: &str,
+    save_path: &str,
+    total_size: i64,
+    category: Option<&str>,
+) {
+    use std::process::{Command, Stdio};
+    let mut command = Command::new(script);
+    command
+        .env("RUSTOR_TORRENT_NAME", name)
+        .env("RUSTOR_TORRENT_HASH", hash)
+        .env("RUSTOR_SAVE_PATH", save_path)
+        .env("RUSTOR_TOTAL_SIZE", total_size.to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    if let Some(category_name) = category {
+        command.env("RUSTOR_CATEGORY", category_name);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            tracing::warn!("completion script spawn failed: {}", error);
+            return;
+        }
+    };
+    // detach a watchdog so a runaway script can't pin a daemon thread
+    std::thread::spawn(move || {
+        let start = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if (!status.success()) {
+                        tracing::warn!("completion script exited with {}", status);
+                    }
+                    return;
+                }
+                Ok(None) => {
+                    if (start.elapsed() >= timeout) {
+                        let _ = child.kill();
+                        tracing::warn!("completion script killed after {:?} timeout", timeout);
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                Err(error) => {
+                    tracing::warn!("completion script wait: {}", error);
+                    return;
+                }
+            }
+        }
+    });
 }
 
 fn check_rename_collision(
@@ -684,14 +959,22 @@ pub fn run(quiet: bool) -> Result<()> {
 
     let mut last_alert_check = Instant::now();
     let mut last_resume_save = Instant::now();
+    let mut last_watch_scan = Instant::now() - Duration::from_secs(60);
     const RESUME_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+    const WATCH_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
     loop {
         if (shutdown.load(Ordering::Relaxed)) { break; }
 
         if (last_alert_check.elapsed() >= Duration::from_millis(500)) {
             app.process_alerts();
+            app.process_completion_hooks();
             last_alert_check = Instant::now();
+        }
+
+        if (last_watch_scan.elapsed() >= WATCH_SCAN_INTERVAL) {
+            app.poll_watch_dirs();
+            last_watch_scan = Instant::now();
         }
 
         // periodic resume snapshot — a SIGKILL or power loss between graceful

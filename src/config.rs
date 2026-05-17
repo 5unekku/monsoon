@@ -51,7 +51,35 @@ pub struct Config {
     pub seed_ratio_limit: f64,
     /// stop seeding after this many minutes (0 = unlimited)
     pub seed_time_limit: i32,
+
+    // ─── automation ───────────────────────────────────────────────────────
+    /// directories scanned every ~5s for new .torrent files. matches are
+    /// auto-added and the file is renamed `.loaded` to prevent re-adding.
+    #[serde(default)]
+    pub watch_directories: Vec<String>,
+    /// optional command run when any torrent finishes. invoked with these
+    /// env vars: RUSTOR_TORRENT_NAME, RUSTOR_TORRENT_HASH, RUSTOR_SAVE_PATH,
+    /// RUSTOR_TOTAL_SIZE, RUSTOR_CATEGORY (when set).
+    #[serde(default)]
+    pub completion_script: Option<String>,
+    /// kill the completion script if it runs longer than this
+    #[serde(default = "default_completion_script_timeout")]
+    pub completion_script_timeout_seconds: u64,
+
+    // ─── tui defaults (applied by the tui on startup) ─────────────────────
+    #[serde(default)]
+    pub tui_show_sidebar: bool,
+    #[serde(default)]
+    pub tui_show_detail: bool,
+    #[serde(default = "default_tui_sidebar_width")]
+    pub tui_sidebar_width: u16,
+    #[serde(default = "default_tui_detail_split_percent")]
+    pub tui_detail_split_percent: u16,
 }
+
+fn default_completion_script_timeout() -> u64 { 60 }
+fn default_tui_sidebar_width() -> u16 { 22 }
+fn default_tui_detail_split_percent() -> u16 { 40 }
 
 impl Default for Config {
     fn default() -> Self {
@@ -85,6 +113,13 @@ impl Default for Config {
             max_active_torrents: 8,
             seed_ratio_limit: 0.0,
             seed_time_limit: 0,
+            watch_directories: Vec::new(),
+            completion_script: None,
+            completion_script_timeout_seconds: default_completion_script_timeout(),
+            tui_show_sidebar: false,
+            tui_show_detail: false,
+            tui_sidebar_width: default_tui_sidebar_width(),
+            tui_detail_split_percent: default_tui_detail_split_percent(),
         }
     }
 }
@@ -151,5 +186,10 @@ impl Config {
     /// list of known torrents, persisted so the daemon can resume them on restart
     pub fn torrent_list_path() -> Result<PathBuf> {
         Ok(Self::data_dir()?.join("torrents.json"))
+    }
+
+    /// categories.toml — definitions of named categories (save_path, etc.)
+    pub fn categories_path() -> Result<PathBuf> {
+        Ok(Self::proj_dirs()?.config_dir().join("categories.toml"))
     }
 }

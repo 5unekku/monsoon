@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 /// snapshot of a single torrent's state, safe to send over ipc
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +29,10 @@ pub struct TorrentInfo {
     pub is_seeding: bool,
     pub has_metadata: bool,
     pub error: String,
+    #[serde(default)]
+    pub tags: BTreeSet<String>,
+    #[serde(default)]
+    pub category: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,7 +92,7 @@ pub struct TorrentDetail {
 pub enum Request {
     List,
     Info { index: usize },
-    Add { uri: String, save_path: Option<String> },
+    Add { uri: String, save_path: Option<String>, category: Option<String> },
     Remove { index: usize, delete_files: bool },
     Pause { index: usize },
     Resume { index: usize },
@@ -114,7 +119,25 @@ pub enum Request {
     Magnet { index: usize },
     /// toggle the sequential-download flag (front-to-back piece order)
     SetSequential { index: usize, enabled: bool },
+    /// replace the tag set on a torrent
+    SetTags { index: usize, tags: BTreeSet<String> },
+    /// set or clear the category on a torrent. `None` clears it.
+    SetCategory { index: usize, name: Option<String> },
+    /// list all configured categories with their save paths
+    ListCategories,
+    /// define or update a category (writes to categories.toml)
+    SetCategoryDefinition { name: String, save_path: String, add_tags: Vec<String> },
+    /// remove a category. torrents previously in it keep their save_path.
+    RemoveCategory { name: String },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CategoryInfo {
+    pub name: String,
+    pub save_path: String,
+    pub add_tags: Vec<String>,
+    pub torrent_count: usize,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -131,6 +154,8 @@ pub enum Response {
     RenameResult { renamed: Vec<usize>, rejected: Vec<(usize, String)> },
     /// magnet URI for a torrent (empty string when invalid or not yet ready)
     Magnet(String),
+    /// list of categories
+    Categories(Vec<CategoryInfo>),
     Ok,
     Err(String),
 }

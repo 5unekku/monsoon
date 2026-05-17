@@ -491,6 +491,13 @@ impl AppState {
         table_state.select(Some(0));
         let mut sidebar_state = ListState::default();
         sidebar_state.select(Some(0));
+
+        // load [tui] defaults from config.toml. failure here is non-fatal —
+        // worst case the user sees built-in defaults until they fix the file.
+        let (show_sidebar, show_detail) = Config::load()
+            .map(|config| (config.tui_show_sidebar, config.tui_show_detail))
+            .unwrap_or((false, false));
+
         Self {
             mode: Mode::Main,
             prompt: None,
@@ -505,8 +512,8 @@ impl AppState {
             last_detail_poll: Instant::now() - DETAIL_POLL_INTERVAL,
             error: None,
             daemon_unreachable: false,
-            show_sidebar: false,
-            show_detail: false,
+            show_sidebar,
+            show_detail,
             focus: Pane::List,
             status_filter: StatusFilter::All,
             detail_tab: DetailTab::Content,
@@ -812,6 +819,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             match client::send(Request::Add {
                 uri: prompt.buffer.clone(),
                 save_path: None,
+                category: None,
             })? {
                 Response::Added { id } => {
                     state.error = Some(format!("added torrent {}", id));

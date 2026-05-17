@@ -1,4 +1,6 @@
-use crate::ipc::{FileInfo, PeerInfo, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo};
+use crate::ipc::{
+    CategoryInfo, FileInfo, PeerInfo, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo,
+};
 use chrono::DateTime;
 
 pub fn format_bytes(bytes: i64) -> String {
@@ -38,6 +40,7 @@ pub fn print_response(response: Response) {
                 println!("{}", uri);
             }
         }
+        Response::Categories(entries) => print_categories(&entries),
         Response::Ok => {}
         Response::Err(message) => eprintln!("error: {}", message),
     }
@@ -188,6 +191,22 @@ fn format_state(state: &str) -> String {
         "checking_resume_data" => "CR".to_string(),
         "allocating" => "AL".to_string(),
         other => other.chars().take(2).collect(),
+    }
+}
+
+fn print_categories(entries: &[CategoryInfo]) {
+    if (entries.is_empty()) {
+        println!("no categories configured (use `rustor category set <name> <path>`)");
+        return;
+    }
+    println!("{:<16} {:<48} {:>6} {}", "name", "save path", "count", "tags");
+    println!("{}", "─".repeat(80));
+    for entry in entries {
+        println!("{:<16} {:<48} {:>6} {}",
+            truncate(&entry.name, 15),
+            truncate(&entry.save_path, 47),
+            entry.torrent_count,
+            entry.add_tags.join(","));
     }
 }
 

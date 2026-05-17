@@ -2,6 +2,7 @@
 #![allow(unused_parens)]
 
 mod bridge;
+mod categories;
 mod client;
 mod config;
 mod display;
@@ -56,6 +57,10 @@ enum Commands {
         /// override the download directory for this torrent
         #[arg(short, long)]
         save_path: Option<String>,
+        /// assign to a configured category (inherits the category's save_path
+        /// when --save-path is not given)
+        #[arg(short, long)]
+        category: Option<String>,
     },
 
     /// remove a torrent
@@ -156,6 +161,20 @@ enum Commands {
         enabled: String,
     },
 
+    /// replace the tag set on a torrent (space-separated). pass no tags to clear.
+    Tags {
+        /// torrent index from `rustor list`
+        index: usize,
+        /// tag names (any number)
+        tags: Vec<String>,
+    },
+
+    /// manage categories (named save-path + auto-tag presets)
+    Category {
+        #[command(subcommand)]
+        action: CategoryAction,
+    },
+
     /// stop the daemon
     Stop,
 
@@ -163,6 +182,29 @@ enum Commands {
     Service {
         #[command(subcommand)]
         action: ServiceAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum CategoryAction {
+    /// list all configured categories with their save paths
+    List,
+    /// define or update a category (writes ~/.config/rustor/categories.toml)
+    Set {
+        name: String,
+        /// save directory torrents in this category default to
+        save_path: String,
+        /// tags auto-applied to torrents in this category (optional, repeatable)
+        #[arg(short, long)]
+        tag: Vec<String>,
+    },
+    /// remove a category. torrents previously in it keep their save_path
+    /// but lose their category label.
+    Remove { name: String },
+    /// assign or clear a torrent's category. omit name to clear.
+    Assign {
+        index: usize,
+        name: Option<String>,
     },
 }
 
@@ -200,7 +242,7 @@ fn command_to_request(command: Commands) -> Request {
     match command {
         Commands::List => Request::List,
         Commands::Info { index } => Request::Info { index },
-        Commands::Add { uri, save_path } => Request::Add { uri, save_path },
+        Commands::Add { uri, save_path, category } => Request::Add { uri, save_path, category },
         Commands::Remove { index, delete_files } => Request::Remove { index, delete_files },
         Commands::Pause { index } => Request::Pause { index },
         Commands::Resume { index } => Request::Resume { index },
@@ -223,6 +265,18 @@ fn command_to_request(command: Commands) -> Request {
         Commands::Sequential { index, enabled } => Request::SetSequential {
             index,
             enabled: matches!(enabled.as_str(), "on" | "true" | "1" | "yes"),
+        },
+        Commands::Tags { index, tags } => Request::SetTags {
+            index,
+            tags: tags.into_iter().collect(),
+        },
+        Commands::Category { action } => match action {
+            CategoryAction::List => Request::ListCategories,
+            CategoryAction::Set { name, save_path, tag } => Request::SetCategoryDefinition {
+                name, save_path, add_tags: tag,
+            },
+            CategoryAction::Remove { name } => Request::RemoveCategory { name },
+            CategoryAction::Assign { index, name } => Request::SetCategory { index, name },
         },
         Commands::Stop => Request::Shutdown,
         Commands::Daemon { .. } | Commands::Service { .. } | Commands::Tui => unreachable!(),
