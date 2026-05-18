@@ -634,6 +634,26 @@ enum Mode {
     Settings(SettingsState),
 }
 
+/// generic text-input capture. when `AppState::active_input` holds one of
+/// these, the main key handler routes every printable keystroke into the
+/// buffer instead of looking up a keybind. this is how inline text fields
+/// (the `/` torrent filter today, and future rename-in-place / set-
+/// download-priority-by-typing-a-number features) coexist with the
+/// letter-heavy main-view keybinds without conflicting.
+///
+/// the `purpose` field is what `commit` reads after `enter` is pressed.
+struct TextInput {
+    purpose: InputPurpose,
+    buffer: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InputPurpose {
+    /// case-insensitive substring filter over torrent names. submits as you
+    /// type — enter just closes the input bar.
+    ListFilter,
+}
+
 /// modal prompt overlay that floats on top of the main view. captures all input
 /// until submitted (`enter`) or cancelled (`esc`).
 struct Prompt {
@@ -670,6 +690,13 @@ enum PromptAction {
 struct AppState {
     mode: Mode,
     prompt: Option<Prompt>,
+    /// inline text field active in the main view. when Some, the main-view
+    /// key handler is bypassed and every printable keystroke goes into the
+    /// buffer. see [TextInput] for the rationale.
+    active_input: Option<TextInput>,
+    /// last filter substring that was applied to the torrent list, kept after
+    /// the input bar closes so the user can re-open it and edit
+    name_filter: String,
     torrents: Vec<TorrentInfo>,
     stats: Option<StatsInfo>,
     detail: Option<TorrentDetail>,
@@ -748,6 +775,8 @@ impl AppState {
         Self {
             mode: Mode::Main,
             prompt: None,
+            active_input: None,
+            name_filter: String::new(),
             torrents: Vec::new(),
             stats: None,
             detail: None,
@@ -778,9 +807,13 @@ impl AppState {
     }
 
     fn filtered_indices(&self) -> Vec<usize> {
+        let name_needle = self.name_filter.to_lowercase();
         self.torrents.iter()
             .enumerate()
             .filter(|(_, torrent)| self.status_filter.matches(torrent))
+            .filter(|(_, torrent)| {
+                name_needle.is_empty() || torrent.name.to_lowercase().contains(&name_needle)
+            })
             .map(|(index, _)| index)
             .collect()
     }
@@ -880,10 +913,15 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         if (event::poll(EVENT_TICK)?) {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    // input-routing ladder. each level captures input wholesale —
+                    // letters bound in the main view don't reach handle_key while
+                    // a higher level is active.
                     let exit = if (state.column_picker.is_some()) {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.prompt.is_some()) {
                         handle_prompt_key(key.code, key.modifiers, &mut state)
+                    } else if (state.active_input.is_some()) {
+                        handle_active_input_key(key.code, key.modifiers, &mut state)
                     } else if (matches!(state.mode, Mode::Settings(_))) {
                         handle_settings_key(key.code, key.modifiers, &mut state)
                     } else {
@@ -958,6 +996,15 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         // shift+s for sequential toggle (lowercase s is wasd-down)
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
+        // open the torrent-list name filter. takes over keyboard input via
+        // active_input so letters typed into the filter don't trigger
+        // sidebar/detail/pause/etc. bindings.
+        (KeyCode::Char('/'), KeyModifiers::NONE) => {
+            state.active_input = Some(TextInput {
+                purpose: InputPurpose::ListFilter,
+                buffer: state.name_filter.clone(),
+            });
+        }
 
         _ => {}
     }
@@ -1204,6 +1251,59 @@ fn collapse_focused(state: &mut AppState, collapse: bool) {
     } else {
         state.collapsed_folders.remove(&row.full_path);
     }
+}
+
+/// inline input bar handler. captures every printable char, backspace,
+/// enter, and esc. for incremental-filter inputs (like ListFilter) the
+/// buffer is propagated to the live filter on every keystroke so the
+/// torrent list updates as you type.
+fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Esc, _) => {
+            // cancel: revert filter to its previous committed value
+            if let Some(input) = state.active_input.take() {
+                if (input.purpose == InputPurpose::ListFilter) {
+                    // nothing to revert — name_filter was being mirrored live
+                    // and the user can simply press / again to edit it
+                }
+            }
+        }
+        (KeyCode::Enter, _) => {
+            // commit closes the input bar; the live buffer was already applied
+            state.active_input = None;
+        }
+        (KeyCode::Backspace, _) => {
+            if let Some(input) = state.active_input.as_mut() {
+                input.buffer.pop();
+                if (input.purpose == InputPurpose::ListFilter) {
+                    state.name_filter = input.buffer.clone();
+                    // keep selection in bounds when the visible set shrinks
+                    let visible = state.filtered_indices().len();
+                    if let Some(selected) = state.table_state.selected() {
+                        if (visible == 0) {
+                            state.table_state.select(None);
+                        } else if (selected >= visible) {
+                            state.table_state.select(Some(visible - 1));
+                        }
+                    }
+                }
+            }
+        }
+        (KeyCode::Char(character), modifiers)
+            if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if let Some(input) = state.active_input.as_mut() {
+                input.buffer.push(character);
+                if (input.purpose == InputPurpose::ListFilter) {
+                    state.name_filter = input.buffer.clone();
+                }
+            }
+        }
+        _ => {}
+    }
+    false
 }
 
 fn handle_picker_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
@@ -1624,8 +1724,21 @@ fn draw_main(frame: &mut ratatui::Frame, state: &mut AppState) {
         Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(center)
     };
 
-    state.list_rect = center_split[0];
-    draw_torrent_list(frame, center_split[0], state);
+    // when an inline input is active, carve a 1-row strip off the bottom of
+    // the torrent list for the input bar. otherwise the list takes the full
+    // center area.
+    let list_area = center_split[0];
+    let (list_inner, input_bar) = if (state.active_input.is_some()) {
+        let split = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(list_area);
+        (split[0], Some(split[1]))
+    } else {
+        (list_area, None)
+    };
+    state.list_rect = list_inner;
+    draw_torrent_list(frame, list_inner, state);
+    if let Some(input_rect) = input_bar {
+        draw_input_bar(frame, input_rect, state);
+    }
     if (state.show_detail) {
         state.detail_rect = center_split[1];
         draw_detail(frame, center_split[1], state);
@@ -2066,6 +2179,22 @@ fn draw_trackers_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     frame.render_widget(table, area);
 }
 
+fn draw_input_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let Some(input) = &state.active_input else { return; };
+    let prefix = match input.purpose {
+        InputPurpose::ListFilter => "/",
+    };
+    let line = Line::from(vec![
+        Span::styled(format!(" {} ", prefix), Style::default().fg(Color::Black).bg(Color::Yellow)),
+        Span::raw(" "),
+        Span::raw(input.buffer.as_str()),
+        Span::styled("█", Style::default().fg(Color::Yellow)),
+        Span::raw("   "),
+        Span::styled("esc cancel / enter close", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
 fn draw_status_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let mut spans: Vec<Span> = Vec::new();
     if let Some(stats) = &state.stats {
@@ -2109,6 +2238,8 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("reann  "),
         Span::styled("q/e ", Style::default().fg(Color::Yellow)),
         Span::raw("sidebar/detail  "),
+        Span::styled("/ ", Style::default().fg(Color::Yellow)),
+        Span::raw("filter  "),
         Span::styled(", ", Style::default().fg(Color::Yellow)),
         Span::raw("settings  "),
         Span::styled("^c ", Style::default().fg(Color::Yellow)),
