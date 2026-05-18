@@ -70,18 +70,18 @@ fn print_torrent_list(list: &[TorrentInfo]) {
         println!("no torrents");
         return;
     }
-    println!("{:<4} {:<32} {:<4} {:>7} {:>12} {:>12} {:<14}",
-        "#", "name", "st", "prog", "down", "up", "peers");
-    println!("{}", "─".repeat(90));
+    println!("{:<5} {:<32} {:<20} {:>8} {:>12} {:>12} {:<10} seeds",
+        "index", "name", "status", "progress", "down", "up", "peers");
+    println!("{}", "─".repeat(110));
     for torrent in list {
         let name = truncate(&torrent.name.chars().collect::<String>(), 31);
-        let state = format_state(&torrent.state);
+        let state = format_state(&torrent.state, torrent.is_paused);
         let progress = format!("{:.1}%", torrent.progress * 100.0);
         let down = format_rate(torrent.download_rate);
         let up = format_rate(torrent.upload_rate);
         let peers = format!("{}/{}", torrent.connected_peers, torrent.total_peers);
-        let seeds = format!("S:{}", torrent.connected_seeds);
-        println!("{:<4} {:<32} {:<4} {:>7} {:>12} {:>12} {} {}",
+        let seeds = format!("{}/{}", torrent.connected_seeds, torrent.total_seeds);
+        println!("{:<5} {:<32} {:<20} {:>8} {:>12} {:>12} {:<10} {}",
             torrent.index, name, state, progress, down, up, peers, seeds);
     }
 }
@@ -132,11 +132,11 @@ fn print_stats(stats: &StatsInfo) {
 }
 
 fn print_peers(peers: &[PeerInfo]) {
-    println!("{:<24} {:>12} {:>12} {:<22} {:>6}",
-        "ip:port", "down", "up", "client", "prog");
+    println!("{:<24} {:>12} {:>12} {:<22} {:>8}",
+        "address", "down", "up", "client", "progress");
     println!("{}", "─".repeat(80));
     for peer in peers {
-        println!("{:<24} {:>12} {:>12} {:<22} {:>5.1}%",
+        println!("{:<24} {:>12} {:>12} {:<22} {:>7.1}%",
             truncate(&format!("{}:{}", peer.ip, peer.port), 23),
             format_rate(peer.download_rate),
             format_rate(peer.upload_rate),
@@ -147,10 +147,11 @@ fn print_peers(peers: &[PeerInfo]) {
 }
 
 fn print_files(files: &[FileInfo]) {
-    println!("{:<4} {:<48} {:>12} {:>7} {:>4}", "#", "path", "size", "prog", "pri");
-    println!("{}", "─".repeat(80));
+    println!("{:<5} {:<48} {:>12} {:>8} {:>8}",
+        "index", "path", "size", "progress", "priority");
+    println!("{}", "─".repeat(85));
     for file in files {
-        println!("{:<4} {:<48} {:>12} {:>6.1}% {:>4}",
+        println!("{:<5} {:<48} {:>12} {:>7.1}% {:>8}",
             file.index,
             truncate(&file.path, 47),
             format_bytes(file.size),
@@ -181,16 +182,18 @@ fn print_trackers(trackers: &[TrackerInfo]) {
     }
 }
 
-fn format_state(state: &str) -> String {
+/// human-readable state name. natural english, no abbreviations.
+fn format_state(state: &str, is_paused: bool) -> String {
+    if (is_paused) { return "paused".to_string(); }
     match state {
-        "downloading" => "DL".to_string(),
-        "seeding" => "SE".to_string(),
-        "finished" => "FN".to_string(),
-        "downloading_metadata" => "MD".to_string(),
-        "checking_files" => "CK".to_string(),
-        "checking_resume_data" => "CR".to_string(),
-        "allocating" => "AL".to_string(),
-        other => other.chars().take(2).collect(),
+        "downloading" => "downloading".to_string(),
+        "seeding" => "seeding".to_string(),
+        "finished" => "finished".to_string(),
+        "downloading_metadata" => "downloading metadata".to_string(),
+        "checking_files" => "checking files".to_string(),
+        "checking_resume_data" => "checking resume".to_string(),
+        "allocating" => "allocating".to_string(),
+        other => other.replace('_', " "),
     }
 }
 

@@ -120,10 +120,10 @@ impl Column {
 
     fn label(&self) -> &'static str {
         match self {
-            Column::Index => "#",
+            Column::Index => "index",
             Column::Name => "name",
-            Column::State => "st",
-            Column::Progress => "prog",
+            Column::State => "status",
+            Column::Progress => "progress",
             Column::Down => "down",
             Column::Up => "up",
             Column::Peers => "peers",
@@ -132,9 +132,9 @@ impl Column {
             Column::Downloaded => "downloaded",
             Column::Uploaded => "uploaded",
             Column::AddedOn => "added on",
-            Column::CompletedOn => "completed",
+            Column::CompletedOn => "completed on",
             Column::SavePath => "save path",
-            Column::Category => "cat",
+            Column::Category => "category",
             Column::Tags => "tags",
             Column::InfoHash => "info hash",
         }
@@ -145,25 +145,29 @@ impl Column {
     /// drag-resize math has predictable inputs.
     fn default_width_cells(&self) -> u16 {
         match self {
-            Column::Index => 4,
-            Column::Name => 24,
-            Column::State => 4,
-            Column::Progress => 7,
+            // widths chosen so the full (non-abbreviated) label fits and the
+            // typical value also fits without ellipsis. drag-resize lets the
+            // user adjust per-column.
+            Column::Index => 6,
+            Column::Name => 28,
+            Column::State => 12,       // longest is "downloading metadata" (20) — user can drag wider
+            Column::Progress => 9,     // "progress" label + "100.0%" value
             Column::Down | Column::Up => 12,
-            Column::Peers => 8,
-            Column::Seeds => 7,
-            Column::Size | Column::Downloaded | Column::Uploaded => 10,
+            Column::Peers => 9,
+            Column::Seeds => 9,
+            Column::Size => 10,
+            Column::Downloaded | Column::Uploaded => 12,
             Column::AddedOn | Column::CompletedOn => 19,
-            Column::SavePath => 24,
+            Column::SavePath => 28,
             Column::Category => 12,
-            Column::Tags => 12,
+            Column::Tags => 14,
             Column::InfoHash => 40,
         }
     }
 
     fn render(&self, index: usize, torrent: &TorrentInfo, nerd_font: bool) -> String {
         match self {
-            Column::Index => format!("{:>3}", index),
+            Column::Index => index.to_string(),
             Column::Name => torrent.name.clone(),
             Column::State => format_state_with(&torrent.state, torrent.is_paused, nerd_font),
             Column::Progress => format!("{:>5.1}%", torrent.progress * 100.0),
@@ -2296,11 +2300,11 @@ fn draw_peers_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) 
     }
 
     let header = Row::new([
-        Cell::from("ip:port").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("address").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("down").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("up").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("client").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("prog").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("progress").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("flags").style(Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
@@ -2320,7 +2324,7 @@ fn draw_peers_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) 
         Constraint::Length(12),
         Constraint::Length(12),
         Constraint::Min(16),
-        Constraint::Length(7),
+        Constraint::Length(9),
         Constraint::Length(8),
     ];
 
@@ -2785,12 +2789,13 @@ fn draw_settings_hint(frame: &mut ratatui::Frame, area: Rect, settings: &Setting
     );
 }
 
-/// state label that optionally substitutes nerd font icons for the ascii
-/// short codes. when nerd_font is false the result is plain ascii so users
-/// without a nerd-font-aware terminal don't see tofu boxes.
+/// state label. natural-english words, no abbreviations. when nerd_font
+/// is true the result is a single glyph so wide-state-name columns can
+/// stay narrow; users without a nerd-font-aware terminal get the full
+/// word instead.
 fn format_state_with(state: &str, is_paused: bool, nerd_font: bool) -> String {
     if (is_paused) {
-        return if (nerd_font) { "\u{f04c}".to_string() } else { "PA".to_string() };
+        return if (nerd_font) { "\u{f04c}".to_string() } else { "paused".to_string() };
     }
     if (nerd_font) {
         return match state {
@@ -2800,17 +2805,18 @@ fn format_state_with(state: &str, is_paused: bool, nerd_font: bool) -> String {
             "downloading_metadata" => "\u{f1ce}".to_string(),
             "checking_files" | "checking_resume_data" => "\u{f021}".to_string(),
             "allocating" => "\u{f0c7}".to_string(),
-            other => other.chars().take(2).collect::<String>().to_uppercase(),
+            other => other.to_string(),
         };
     }
+    // libtorrent uses underscore_case; render as the human-readable form
     match state {
-        "downloading" => "DL".to_string(),
-        "seeding" => "SE".to_string(),
-        "finished" => "FN".to_string(),
-        "downloading_metadata" => "MD".to_string(),
-        "checking_files" => "CK".to_string(),
-        "checking_resume_data" => "CR".to_string(),
-        "allocating" => "AL".to_string(),
-        other => other.chars().take(2).collect::<String>().to_uppercase(),
+        "downloading" => "downloading".to_string(),
+        "seeding" => "seeding".to_string(),
+        "finished" => "finished".to_string(),
+        "downloading_metadata" => "downloading metadata".to_string(),
+        "checking_files" => "checking files".to_string(),
+        "checking_resume_data" => "checking resume".to_string(),
+        "allocating" => "allocating".to_string(),
+        other => other.replace('_', " "),
     }
 }
