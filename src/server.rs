@@ -1,5 +1,5 @@
 use crate::bridge::ffi;
-use crate::categories::{Categories, Category};
+use crate::categories::{Categories, Category, TagRules};
 use crate::config::Config;
 use crate::network;
 use crate::ipc::{
@@ -53,6 +53,7 @@ pub struct App {
     torrents: Vec<ManagedTorrent>,
     config: Config,
     categories: Categories,
+    tag_rules: TagRules,
 }
 
 impl App {
@@ -62,7 +63,11 @@ impl App {
             tracing::warn!("failed to load categories.toml ({}); using empty set", error);
             Categories::default()
         });
-        Ok(Self { session, torrents: Vec::new(), config, categories })
+        let tag_rules = TagRules::load().unwrap_or_else(|error| {
+            tracing::warn!("failed to load rules.toml ({}); using empty set", error);
+            TagRules::default()
+        });
+        Ok(Self { session, torrents: Vec::new(), config, categories, tag_rules })
     }
 
     /// load saved torrent list and resume each one with its fastresume data
@@ -157,9 +162,16 @@ impl App {
         save_path: Option<&str>,
         category: Option<&str>,
     ) -> Result<String> {
-        let (save_path, tags) = self.resolve_add_target(save_path, category);
+        let (save_path, mut tags) = self.resolve_add_target(save_path, category);
         let handle = self.session.add_torrent_magnet(uri, &save_path, None)?;
         let info_hash = handle.info_hash();
+        // evaluate auto-tag rules against whatever we know now (name from
+        // status, no trackers yet for magnets). retagging happens later on
+        // metadata-received via `rustor retag`.
+        let status = handle.status();
+        let trackers = handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
+        let auto_tags = self.tag_rules.evaluate(&status.name, status.total_wanted, &trackers);
+        tags.extend(auto_tags);
         self.torrents.push(ManagedTorrent {
             handle,
             magnet_uri: Some(uri.to_string()),
@@ -184,9 +196,13 @@ impl App {
         if (!std::path::Path::new(file_path).exists()) {
             return Err(anyhow::anyhow!("file not found: {}", file_path));
         }
-        let (save_path, tags) = self.resolve_add_target(save_path, category);
+        let (save_path, mut tags) = self.resolve_add_target(save_path, category);
         let handle = self.session.add_torrent_file(file_path, &save_path, None)?;
         let info_hash = handle.info_hash();
+        let status = handle.status();
+        let trackers = handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
+        let auto_tags = self.tag_rules.evaluate(&status.name, status.total_wanted, &trackers);
+        tags.extend(auto_tags);
         self.torrents.push(ManagedTorrent {
             handle,
             magnet_uri: None,
@@ -200,6 +216,27 @@ impl App {
         });
         self.persist_torrent_list();
         Ok(info_hash)
+    }
+
+    /// re-evaluate auto-tag rules against every torrent's current state.
+    /// useful after a magnet has fetched its metadata or after editing
+    /// rules.toml. existing tags are preserved (rules can only add).
+    fn retag_all(&mut self) -> usize {
+        // reload rules from disk first so editing the file doesn't need a daemon restart
+        if let Ok(rules) = TagRules::load() {
+            self.tag_rules = rules;
+        }
+        let mut updated = 0;
+        for torrent in self.torrents.iter_mut() {
+            let status = torrent.handle.status();
+            let trackers = torrent.handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
+            let auto_tags = self.tag_rules.evaluate(&status.name, status.total_wanted, &trackers);
+            let before = torrent.tags.len();
+            torrent.tags.extend(auto_tags);
+            if (torrent.tags.len() > before) { updated += 1; }
+        }
+        if (updated > 0) { self.persist_torrent_list(); }
+        updated
     }
 
     fn remove(&mut self, index: usize, delete_files: bool) -> Result<()> {
@@ -500,10 +537,22 @@ impl App {
 
     /// load an ip filter (PeerGuardian or CIDR) from disk if configured.
     /// non-fatal — startup proceeds without filtering if the file is missing
-    /// or malformed (the bridge logs the count).
+    /// or malformed (the bridge logs the count). when ip_filter_url is set,
+    /// we try to refresh the local file from the URL first using the system
+    /// `curl` (avoids pulling in a tls http client just for blocklists).
     pub fn install_ip_filter(&mut self) {
         let path = self.config.ip_filter_path.clone();
         if (path.trim().is_empty()) { return; }
+        // try to refresh from URL when configured. silent failure preserves
+        // the previous on-disk copy so a transient outage doesn't drop the filter.
+        let url = self.config.ip_filter_url.clone();
+        if (!url.trim().is_empty()) {
+            if let Err(error) = refresh_ip_filter(&url, &path) {
+                tracing::warn!(url = %url, "ip filter refresh failed: {}", error);
+            } else {
+                tracing::info!(url = %url, path = %path, "ip filter refreshed");
+            }
+        }
         if (!std::path::Path::new(&path).exists()) {
             tracing::warn!(path = %path, "ip filter file missing");
             return;
@@ -745,6 +794,10 @@ impl App {
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
+            Request::RetagAll => {
+                let count = self.retag_all();
+                Response::Config(format!("retagged {} torrent(s)\n", count))
+            }
             Request::SetTorrentInterface { index, interface } => {
                 match self.torrents.get_mut(index) {
                     None => Response::Err(format!("invalid index: {}", index)),
@@ -922,6 +975,28 @@ fn handle_network_connection(app: &mut App, mut authed: network::AuthedConnectio
     let json = serde_json::to_string(&response)?;
     authed.stream.write_all(json.as_bytes())?;
     authed.stream.write_all(b"\n")?;
+    Ok(())
+}
+
+/// fetch an ip-filter blocklist via the system curl into `target`. silent
+/// HTTPS validation is delegated to curl; output goes to a temp file first
+/// and is only swapped on a successful fetch so a partial download can't
+/// poison the live filter.
+fn refresh_ip_filter(url: &str, target: &str) -> Result<()> {
+    use std::process::Command;
+    let temp_path = format!("{}.partial", target);
+    let status = Command::new("curl")
+        .args(["-fsSL", "--max-time", "60", "-o", &temp_path, url])
+        .status()
+        .map_err(|error| anyhow::anyhow!("curl: {}", error))?;
+    if (!status.success()) {
+        let _ = std::fs::remove_file(&temp_path);
+        anyhow::bail!("curl exited with {}", status);
+    }
+    if let Some(parent) = std::path::Path::new(target).parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    std::fs::rename(&temp_path, target).context("swap ip filter into place")?;
     Ok(())
 }
 

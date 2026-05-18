@@ -190,6 +190,11 @@ enum Commands {
         tags: Vec<String>,
     },
 
+    /// re-evaluate ~/.config/rustor/rules.toml against every torrent and
+    /// apply matching add_tags. useful after editing rules or after a magnet
+    /// has fetched its metadata.
+    Retag,
+
     /// manage categories (named save-path + auto-tag presets)
     Category {
         #[command(subcommand)]
@@ -383,6 +388,7 @@ fn command_to_request(command: Commands) -> Request {
             index,
             tags: tags.into_iter().collect(),
         },
+        Commands::Retag => Request::RetagAll,
         Commands::Bind { index, interface } => Request::SetTorrentInterface { index, interface },
         Commands::Category { action } => match action {
             CategoryAction::List => Request::ListCategories,

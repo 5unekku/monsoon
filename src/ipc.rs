@@ -132,6 +132,9 @@ pub enum Request {
     /// pin a torrent's outgoing connections to a specific network interface.
     /// `None` clears the per-torrent override.
     SetTorrentInterface { index: usize, interface: Option<String> },
+    /// re-evaluate rules.toml against every torrent and apply add_tags.
+    /// returns the number of torrents whose tag set grew.
+    RetagAll,
     Shutdown,
 }
 

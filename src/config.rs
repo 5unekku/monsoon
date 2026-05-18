@@ -274,6 +274,11 @@ impl Config {
         Ok(Self::proj_dirs()?.config_dir().join("categories.toml"))
     }
 
+    /// rules.toml — auto-tagging rules evaluated on torrent add
+    pub fn tag_rules_path() -> Result<PathBuf> {
+        Ok(Self::proj_dirs()?.config_dir().join("rules.toml"))
+    }
+
     /// pidfile location for daemons launched via `rustor daemon --detach`.
     /// lives alongside the socket so `rustor status` / `rustor kill` find it
     /// without consulting the daemon itself.
