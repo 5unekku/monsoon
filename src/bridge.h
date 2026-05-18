@@ -78,8 +78,6 @@ namespace rustbridge {
     rust::Vec<PeerInfo> bridge_get_torrent_peers(const torrent_handle &hdl);
     rust::Vec<AlertInfo> bridge_pop_alerts(session &ses);
     SessionStats bridge_get_session_stats(const session &ses);
-    rust::Vec<uint8_t> bridge_get_resume_data(const torrent_handle &hdl);
-
     rust::String bridge_get_libtorrent_version();
     rust::String bridge_info_hash_to_string(const torrent_handle &hdl);
     bool bridge_torrent_is_valid(const torrent_handle &hdl);
@@ -114,7 +112,6 @@ namespace rustbridge {
 
     // load an ip filter from disk. returns rules-loaded count, or -1 on error.
     int32_t bridge_session_load_ip_filter(session &ses, rust::Str path);
-    void bridge_session_clear_ip_filter(session &ses);
 
     // async session stats: triggers post_session_stats; the resulting alert
     // updates an internal snapshot read by bridge_get_session_stats.

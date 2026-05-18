@@ -199,7 +199,7 @@ fn print_categories(entries: &[CategoryInfo]) {
         println!("no categories configured (use `rustor category set <name> <path>`)");
         return;
     }
-    println!("{:<16} {:<48} {:>6} {}", "name", "save path", "count", "tags");
+    println!("{:<16} {:<48} {:>6} tags", "name", "save path", "count");
     println!("{}", "─".repeat(80));
     for entry in entries {
         println!("{:<16} {:<48} {:>6} {}",

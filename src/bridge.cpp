@@ -469,20 +469,6 @@ rust::Vec<rustbridge::PendingResume> bridge_take_pending_resume_data() {
     return result;
 }
 
-// ─── Resume Data ───────────────────────────────────────────────────────────
-// TODO: migrate to async save_resume_data() + save_resume_data_alert
-// write_resume_data() is deprecated; returning raw bytes avoids utf-8 corruption
-
-rust::Vec<uint8_t> bridge_get_resume_data(const lt::torrent_handle &hdl) {
-    rust::Vec<uint8_t> result;
-    if (!hdl.is_valid()) return result;
-    lt::entry rd = hdl.write_resume_data();
-    std::vector<char> buf;
-    lt::bencode(std::back_inserter(buf), rd);
-    for (char c : buf) result.push_back(static_cast<uint8_t>(c));
-    return result;
-}
-
 // ─── Utility ───────────────────────────────────────────────────────────────
 
 rust::String bridge_get_libtorrent_version() { return rust::String(LIBTORRENT_VERSION); }
@@ -620,9 +606,6 @@ int32_t bridge_session_load_ip_filter(lt::session &ses, rust::Str path) {
     return count;
 }
 
-void bridge_session_clear_ip_filter(lt::session &ses) {
-    ses.set_ip_filter(lt::ip_filter());
-}
 
 rust::Vec<float> bridge_get_file_progress(const lt::torrent_handle &hdl) {
     rust::Vec<float> result;

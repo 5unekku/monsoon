@@ -116,9 +116,6 @@ impl Session {
         ffi::bridge_session_load_ip_filter(self.inner.pin_mut(), path)
     }
 
-    pub fn clear_ip_filter(&mut self) {
-        ffi::bridge_session_clear_ip_filter(self.inner.pin_mut());
-    }
 }
 
 pub struct TorrentHandle {
@@ -134,13 +131,6 @@ impl TorrentHandle {
     pub fn resume(&self) { ffi::bridge_torrent_resume(&self.inner); }
     pub fn force_recheck(&self) { ffi::bridge_torrent_force_recheck(&self.inner); }
     pub fn info_hash(&self) -> String { ffi::bridge_info_hash_to_string(&self.inner) }
-
-    /// legacy synchronous resume_data. kept as a fallback for one-shot
-    /// shutdown paths where async would mean draining alerts during
-    /// teardown. new code should call `submit_save_resume_data` instead.
-    pub fn resume_data(&self) -> Vec<u8> {
-        ffi::bridge_get_resume_data(&self.inner)
-    }
 
     /// submit an async save_resume_data. the bencoded blob arrives later
     /// via `Session::take_pending_resume_data()`.

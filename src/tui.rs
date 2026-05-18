@@ -22,8 +22,7 @@ use std::time::{Duration, Instant};
 use crate::client;
 use crate::config::Config;
 use crate::ipc::{
-    FileInfo, PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo,
-    TrackerInfo,
+    PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -629,9 +628,11 @@ impl DetailTab {
 }
 
 /// top-level UI mode. settings hijacks the screen and consumes all input.
+/// boxed because SettingsState is ~570 bytes — without the indirection the
+/// Main variant would carry that dead weight on every AppState.mode access.
 enum Mode {
     Main,
-    Settings(SettingsState),
+    Settings(Box<SettingsState>),
 }
 
 /// generic text-input capture. when `AppState::active_input` holds one of
@@ -676,15 +677,17 @@ struct Prompt {
 
 impl Prompt {
     fn single_line_buffer(&self) -> String {
-        self.lines.get(0).cloned().unwrap_or_default()
+        self.lines.first().cloned().unwrap_or_default()
     }
 }
 
+/// what a Prompt's `enter` should do. names are intentionally bare (no
+/// `Torrent` suffix) because that suffix would repeat on every variant.
 #[derive(Clone, Copy)]
 enum PromptAction {
-    RenameTorrent,
-    MoveTorrent,
-    AddTorrent,
+    Rename,
+    Move,
+    Add,
 }
 
 struct AppState {
@@ -978,7 +981,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         // 'preferences' shortcut in most editors); ctrl+, also works.
         (KeyCode::Char(','), KeyModifiers::NONE) | (KeyCode::Char(','), KeyModifiers::CONTROL) => {
             match SettingsState::load() {
-                Ok(settings) => state.mode = Mode::Settings(settings),
+                Ok(settings) => state.mode = Mode::Settings(Box::new(settings)),
                 Err(error) => state.error = Some(format!("settings: {}", error)),
             }
         }
@@ -1022,7 +1025,7 @@ fn open_rename_prompt(state: &mut AppState) {
         helper: "files inside are not renamed; use the content tab + F2 for individual files".to_string(),
         lines: vec![current],
         cursor_line: 0,
-        action: PromptAction::RenameTorrent,
+        action: PromptAction::Rename,
         torrent_index: index,
         allow_multiline: false,
     });
@@ -1040,7 +1043,7 @@ fn open_move_prompt(state: &mut AppState) {
         helper: "absolute path. files will be moved on disk by libtorrent.".to_string(),
         lines: vec![current],
         cursor_line: 0,
-        action: PromptAction::MoveTorrent,
+        action: PromptAction::Move,
         torrent_index: index,
         allow_multiline: false,
     });
@@ -1052,7 +1055,7 @@ fn open_add_prompt(state: &mut AppState) {
         helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, or ~/foo.torrent — one per line".to_string(),
         lines: vec![String::new()],
         cursor_line: 0,
-        action: PromptAction::AddTorrent,
+        action: PromptAction::Add,
         torrent_index: 0,
         allow_multiline: true,
     });
@@ -1113,13 +1116,13 @@ fn toggle_sequential(state: &mut AppState) {
 /// that explains itself.
 fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
     match prompt.action {
-        PromptAction::RenameTorrent => {
+        PromptAction::Rename => {
             Err(anyhow::anyhow!(
                 "renaming the torrent name itself is not yet wired. \
                  use the content tab (e, ]) and F2 to rename individual files."
             ))
         }
-        PromptAction::MoveTorrent => {
+        PromptAction::Move => {
             match client::send(Request::Move {
                 index: prompt.torrent_index,
                 new_save_path: prompt.single_line_buffer(),
@@ -1129,7 +1132,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                 _ => Err(anyhow::anyhow!("unexpected response")),
             }
         }
-        PromptAction::AddTorrent => {
+        PromptAction::Add => {
             // every non-blank line dispatches a separate Add. errors are
             // collected so a single bad line doesn't abort the batch.
             let mut succeeded: Vec<String> = Vec::new();

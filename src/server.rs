@@ -1257,13 +1257,11 @@ pub fn run(quiet: bool) -> Result<()> {
     // encryption hard-fail: when 'forced' is set, ssrf_mitigation must also be
     // on (otherwise tracker redirects can bypass it) and the daemon should
     // refuse to start with manifestly leaky options.
-    if (config.encryption_mode == "forced") {
-        if (!config.ssrf_mitigation) {
-            anyhow::bail!(
-                "encryption_mode = forced requires ssrf_mitigation = true \
-                 (otherwise tracker redirects to plaintext peers can bypass it)"
-            );
-        }
+    if (config.encryption_mode == "forced" && !config.ssrf_mitigation) {
+        anyhow::bail!(
+            "encryption_mode = forced requires ssrf_mitigation = true \
+             (otherwise tracker redirects to plaintext peers can bypass it)"
+        );
     }
 
     let socket_path = Config::socket_path().context("socket path")?;

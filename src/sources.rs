@@ -11,7 +11,7 @@
 //! config.toml can be specified by interface name (e.g. "tun0") instead
 //! of by raw ip.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 
 /// enumerate available network interfaces. cross-platform: uses
@@ -133,7 +133,7 @@ fn expand_tilde(input: &str) -> Result<String> {
             .ok_or_else(|| anyhow::anyhow!("cannot resolve home directory"))?
             .home_dir()
             .to_path_buf();
-        let suffix = rest.trim_start_matches(|c| c == '/' || c == '\\');
+        let suffix = rest.trim_start_matches(['/', '\\']);
         return Ok(home.join(suffix).to_string_lossy().to_string());
     }
     // ~someuser/foo — best-effort: ask getpwnam on unix via /etc/passwd lookup.
@@ -141,7 +141,7 @@ fn expand_tilde(input: &str) -> Result<String> {
     // so the user knows what we tried.
     #[cfg(unix)]
     {
-        if let Some(slash) = rest.find(|c| c == '/' || c == '\\') {
+        if let Some(slash) = rest.find(['/', '\\']) {
             let username = &rest[..slash];
             let suffix = &rest[slash + 1..];
             if let Some(home) = lookup_user_home_via_passwd(username) {

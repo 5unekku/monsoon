@@ -300,7 +300,7 @@ fn print_interfaces() -> Result<()> {
         println!("(no interfaces detected)");
         return Ok(());
     }
-    println!("{:<16} {}", "interface", "address");
+    println!("{:<16} address", "interface");
     println!("{}", "─".repeat(40));
     for (name, address) in entries {
         println!("{:<16} {}", name, address);
@@ -362,8 +362,8 @@ fn send_sigterm_to_daemon() -> Result<()> {
     Ok(())
 }
 
-/// `signal` 0 is a no-op probe (does the pid exist?); 15 is SIGTERM.
-/// kept off the `libc` crate — one extern fn doesn't justify a dep.
+// signal 0 is a no-op probe (does the pid exist?); 15 is SIGTERM.
+// kept off the `libc` crate — one extern fn doesn't justify a dep.
 #[cfg(unix)]
 unsafe extern "C" {
     fn kill(pid: i32, signal: i32) -> i32;

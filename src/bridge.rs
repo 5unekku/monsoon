@@ -201,9 +201,6 @@ pub mod ffi {
         // Session stats
         pub fn bridge_get_session_stats(ses: &session) -> SessionStats;
 
-        // Resume data
-        pub fn bridge_get_resume_data(hdl: &torrent_handle) -> Vec<u8>;
-
         // Utility
         pub fn bridge_get_libtorrent_version() -> String;
         pub fn bridge_info_hash_to_string(hdl: &torrent_handle) -> String;
@@ -245,8 +242,6 @@ pub mod ffi {
         /// or -1 on parse error.
         pub fn bridge_session_load_ip_filter(ses: Pin<&mut session>, path: &str) -> i32;
 
-        /// clear any active ip filter
-        pub fn bridge_session_clear_ip_filter(ses: Pin<&mut session>);
 
         // ─── async session stats migration ─────────────────────────────────
         // post_session_stats triggers a session_stats_alert which the bridge
