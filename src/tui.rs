@@ -1106,10 +1106,10 @@ fn handle_picker_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
             }
         }
         // shift+up/down reorders the selected column up or down within the visible set
-        (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Char('W'), KeyModifiers::SHIFT) => {
+        (KeyCode::Char('W'), KeyModifiers::SHIFT) => {
             move_visible_column(state, Column::ALL[selected], -1);
         }
-        (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
+        (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
             move_visible_column(state, Column::ALL[selected], 1);
         }
         _ => {}

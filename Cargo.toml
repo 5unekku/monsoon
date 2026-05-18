@@ -21,6 +21,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ratatui = "0.29"
 crossterm = "0.28"
 unicode-width = "0.2"
+rustls = "0.23"
+rustls-pemfile = "2"
+rcgen = "0.13"
 
 [build-dependencies]
 cxx-build = "1.0"

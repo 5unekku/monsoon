@@ -117,6 +117,26 @@ pub struct Config {
     /// terminal see legible text instead of tofu.
     #[serde(default)]
     pub tui_nerd_font: bool,
+
+    // ─── networked daemon (TLS-only) ──────────────────────────────────────
+    /// optional TCP listen address for remote control (e.g. "0.0.0.0:6890"
+    /// or "127.0.0.1:6890"). when set, the daemon also accepts TLS-wrapped
+    /// json-line connections. plaintext is never accepted, even on localhost.
+    /// the unix socket remains active for local clients.
+    #[serde(default)]
+    pub network_listen_address: String,
+    /// shared-secret token clients must send (`AUTH <token>\n`) before any
+    /// other command. generated on first start when `network_listen_address`
+    /// is set and persisted here for future reads.
+    #[serde(default)]
+    pub network_auth_token: String,
+    /// path to the TLS cert (PEM). a self-signed cert is generated on first
+    /// start when this is empty.
+    #[serde(default)]
+    pub network_cert_path: String,
+    /// path to the TLS private key (PEM).
+    #[serde(default)]
+    pub network_key_path: String,
 }
 
 fn default_completion_script_timeout() -> u64 { 60 }
@@ -177,6 +197,10 @@ impl Default for Config {
             tui_detail_split_percent: default_tui_detail_split_percent(),
             tui_columns: Vec::new(),
             tui_nerd_font: false,
+            network_listen_address: String::new(),
+            network_auth_token: String::new(),
+            network_cert_path: String::new(),
+            network_key_path: String::new(),
         }
     }
 }

@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod display;
 mod ipc;
+mod network;
 mod server;
 mod session;
 mod tui;
@@ -26,6 +27,14 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
+    /// connect to a remote daemon over TCP+TLS instead of the local unix socket.
+    /// example: --server example.com:6890 --token <hex>
+    #[arg(long, global = true)]
+    server: Option<String>,
+    /// auth token for --server. if omitted, RUSTOR_TOKEN env or
+    /// ~/.config/rustor/token is consulted.
+    #[arg(long, global = true)]
+    token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -260,11 +269,34 @@ fn main() -> Result<()> {
         Some(Commands::Service { action }) => run_service_command(action),
         Some(command) => {
             let request = command_to_request(command);
-            let response = client::send(request)?;
+            let response = match cli.server {
+                Some(server) => {
+                    let token = resolve_token(cli.token)?;
+                    client::send_network(&server, &token, request)?
+                }
+                None => client::send(request)?,
+            };
             display::print_response(response);
             Ok(())
         }
     }
+}
+
+fn resolve_token(explicit: Option<String>) -> Result<String> {
+    if let Some(token) = explicit {
+        return Ok(token);
+    }
+    if let Ok(token) = std::env::var("RUSTOR_TOKEN") {
+        if (!token.is_empty()) { return Ok(token); }
+    }
+    let proj = directories::ProjectDirs::from("com", "rustor", "rustor")
+        .ok_or_else(|| anyhow::anyhow!("locate project dirs"))?;
+    let token_path = proj.config_dir().join("token");
+    if (token_path.exists()) {
+        let token = std::fs::read_to_string(&token_path)?;
+        return Ok(token.trim().to_string());
+    }
+    anyhow::bail!("no token: pass --token, set RUSTOR_TOKEN, or write {}", token_path.display())
 }
 
 fn print_daemon_status() -> Result<()> {

@@ -1,6 +1,7 @@
 use crate::bridge::ffi;
 use crate::categories::{Categories, Category};
 use crate::config::Config;
+use crate::network;
 use crate::ipc::{
     CategoryInfo, FileInfo, PeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo,
     TrackerInfo,
@@ -858,6 +859,72 @@ fn validate_rename_name(new_name: &str) -> Result<()> {
 /// fire a user-configured completion script with env vars describing the
 /// completed torrent. fully detached — we do not block the daemon waiting
 /// for it. a separate watchdog thread kills the process if it overruns.
+struct NetworkState {
+    listener: std::net::TcpListener,
+    tls_config: std::sync::Arc<rustls::ServerConfig>,
+    token: String,
+}
+
+/// build the network listener when configured. side effect: may generate a
+/// self-signed cert and a random auth token, persisting both to config.toml
+/// on first start so a follow-up `rustor` invocation can read them back.
+fn setup_network_listener(config: &mut Config) -> Result<Option<NetworkState>> {
+    if (config.network_listen_address.trim().is_empty()) {
+        return Ok(None);
+    }
+    let tls_config = network::ensure_tls_material(config).context("tls material")?;
+    if (config.network_auth_token.is_empty()) {
+        config.network_auth_token = network::generate_token();
+        tracing::info!("generated network auth token (see config.toml or RUSTOR_TOKEN)");
+    }
+    // persist any generated cert paths + token so the next start finds them
+    let _ = config.save();
+    let listener = network::bind(&config.network_listen_address)?;
+    tracing::info!(
+        listen = %config.network_listen_address,
+        "network listener active (TLS only)"
+    );
+    Ok(Some(NetworkState {
+        listener,
+        tls_config,
+        token: config.network_auth_token.clone(),
+    }))
+}
+
+fn handle_network_connection(app: &mut App, mut authed: network::AuthedConnection) -> Result<()> {
+    use std::io::{BufRead, BufReader, Write};
+    // read one request per connection. clients re-connect for each command
+    // (same as the unix socket path) so per-conn state stays tiny.
+    let mut reader = BufReader::new(&mut authed.stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).context("read network request")?;
+    drop(reader);
+    if (line.trim().is_empty()) { return Ok(()); }
+    let request: Request = match serde_json::from_str(line.trim()) {
+        Ok(request) => request,
+        Err(error) => {
+            let response = Response::Err(format!("bad request: {}", error));
+            let json = serde_json::to_string(&response).context("serialize response")?;
+            authed.stream.write_all(json.as_bytes())?;
+            authed.stream.write_all(b"\n")?;
+            return Ok(());
+        }
+    };
+    // Shutdown over the network is disallowed — kill the daemon from local
+    if (matches!(request, Request::Shutdown)) {
+        let response = Response::Err("Shutdown is disallowed over the network".to_string());
+        let json = serde_json::to_string(&response)?;
+        authed.stream.write_all(json.as_bytes())?;
+        authed.stream.write_all(b"\n")?;
+        return Ok(());
+    }
+    let response = app.handle_request(request);
+    let json = serde_json::to_string(&response)?;
+    authed.stream.write_all(json.as_bytes())?;
+    authed.stream.write_all(b"\n")?;
+    Ok(())
+}
+
 /// open a tcp connection to the proxy host:port. used as a hard-fail probe
 /// before starting the libtorrent session — if the proxy is unreachable, the
 /// daemon refuses to start rather than fall through to a direct connection.
@@ -1077,7 +1144,7 @@ pub fn run(quiet: bool) -> Result<()> {
             .init();
     }
 
-    let config = Config::load().context("load config")?;
+    let mut config = Config::load().context("load config")?;
 
     // hard-fail safety checks BEFORE binding the ipc socket so a misconfigured
     // proxy or ip filter takes the daemon down before it can leak traffic
@@ -1101,7 +1168,7 @@ pub fn run(quiet: bool) -> Result<()> {
     // remove any stale socket from a previous crash
     let _ = std::fs::remove_file(&socket_path);
 
-    let mut app = App::new(config).context("create session")?;
+    let mut app = App::new(config.clone()).context("create session")?;
     app.install_ip_filter();
     if let Err(error) = app.load_torrents() {
         tracing::warn!("could not restore saved torrents: {}", error);
@@ -1109,6 +1176,10 @@ pub fn run(quiet: bool) -> Result<()> {
 
     let listener = UnixListener::bind(&socket_path).context("bind socket")?;
     listener.set_nonblocking(true).context("set nonblocking")?;
+
+    // optional TLS-only TCP listener for remote control. when configured,
+    // we ensure cert+token exist, persist them, and start accepting.
+    let network_state = setup_network_listener(&mut config)?;
 
     let pidfile_path = write_pidfile().context("write pidfile")?;
 
@@ -1166,6 +1237,32 @@ pub fn run(quiet: bool) -> Result<()> {
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(error) => return Err(error.into()),
+        }
+
+        // network listener — accept one connection per loop tick, with full
+        // tls handshake + AUTH gate happening on this thread. heavy clients
+        // should connect via the unix socket; the network path is for
+        // occasional remote control and is intentionally not threaded.
+        if let Some(network) = &network_state {
+            match network.listener.accept() {
+                Ok((tcp_stream, peer_addr)) => {
+                    match network::AuthedConnection::accept(
+                        tcp_stream,
+                        Arc::clone(&network.tls_config),
+                        &network.token,
+                    ) {
+                        Ok(authed) => {
+                            tracing::info!(peer = %peer_addr, "network: authed connection");
+                            if let Err(error) = handle_network_connection(&mut app, authed) {
+                                tracing::warn!("network ipc error: {}", error);
+                            }
+                        }
+                        Err(error) => tracing::warn!(peer = %peer_addr, "network rejected: {}", error),
+                    }
+                }
+                Err(ref error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => tracing::warn!("network accept: {}", error),
+            }
         }
     }
 
