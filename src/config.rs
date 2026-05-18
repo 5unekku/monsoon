@@ -112,6 +112,11 @@ pub struct Config {
     /// "use built-in defaults". valid keys live in tui::columns.
     #[serde(default)]
     pub tui_columns: Vec<String>,
+    /// when true, the tui renders nerd font glyphs (`󰇚` etc.) instead of
+    /// ascii state labels. off by default so users without a nerd-font
+    /// terminal see legible text instead of tofu.
+    #[serde(default)]
+    pub tui_nerd_font: bool,
 }
 
 fn default_completion_script_timeout() -> u64 { 60 }
@@ -171,6 +176,7 @@ impl Default for Config {
             tui_sidebar_width: default_tui_sidebar_width(),
             tui_detail_split_percent: default_tui_detail_split_percent(),
             tui_columns: Vec::new(),
+            tui_nerd_font: false,
         }
     }
 }

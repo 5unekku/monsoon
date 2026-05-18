@@ -159,11 +159,11 @@ impl Column {
         }
     }
 
-    fn render(&self, index: usize, torrent: &TorrentInfo) -> String {
+    fn render(&self, index: usize, torrent: &TorrentInfo, nerd_font: bool) -> String {
         match self {
             Column::Index => format!("{:>3}", index),
             Column::Name => torrent.name.clone(),
-            Column::State => format_state(&torrent.state, torrent.is_paused),
+            Column::State => format_state_with(&torrent.state, torrent.is_paused, nerd_font),
             Column::Progress => format!("{:>5.1}%", torrent.progress * 100.0),
             Column::Down => crate::display::format_rate(torrent.download_rate),
             Column::Up => crate::display::format_rate(torrent.upload_rate),
@@ -631,6 +631,11 @@ struct AppState {
     column_picker: Option<usize>,
     /// folder paths that are currently collapsed in the content tab
     collapsed_folders: std::collections::BTreeSet<String>,
+    /// terminal capabilities probed at startup. truecolor is recorded but
+    /// not yet used; gates a future richer hsl palette.
+    #[allow(dead_code)]
+    truecolor: bool,
+    nerd_font: bool,
 }
 
 impl AppState {
@@ -642,9 +647,21 @@ impl AppState {
 
         // load [tui] defaults from config.toml. failure here is non-fatal —
         // worst case the user sees built-in defaults until they fix the file.
-        let (show_sidebar, show_detail, configured_columns) = Config::load()
-            .map(|config| (config.tui_show_sidebar, config.tui_show_detail, config.tui_columns))
-            .unwrap_or((false, false, Vec::new()));
+        let (show_sidebar, show_detail, configured_columns, nerd_font) = Config::load()
+            .map(|config| (
+                config.tui_show_sidebar,
+                config.tui_show_detail,
+                config.tui_columns,
+                config.tui_nerd_font,
+            ))
+            .unwrap_or((false, false, Vec::new(), false));
+
+        // truecolor probe — most modern terminals export COLORTERM=truecolor.
+        // we don't use the result much (ratatui maps to whatever the terminal
+        // supports) but it gates a future richer palette.
+        let truecolor = std::env::var("COLORTERM")
+            .map(|value| value.contains("truecolor") || value.contains("24bit"))
+            .unwrap_or(false);
         let visible_columns: Vec<Column> = if (configured_columns.is_empty()) {
             DEFAULT_COLUMNS.to_vec()
         } else {
@@ -686,6 +703,8 @@ impl AppState {
             visible_columns,
             column_picker: None,
             collapsed_folders: std::collections::BTreeSet::new(),
+            truecolor,
+            nerd_font,
         }
     }
 
@@ -1544,7 +1563,7 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
             Style::default()
         };
         let cells: Vec<Cell> = state.visible_columns.iter()
-            .map(|column| Cell::from(column.render(*index, torrent)))
+            .map(|column| Cell::from(column.render(*index, torrent, state.nerd_font)))
             .collect();
         Row::new(cells).style(row_style)
     }).collect();
@@ -2208,8 +2227,24 @@ fn draw_settings_hint(frame: &mut ratatui::Frame, area: Rect, settings: &Setting
     );
 }
 
-fn format_state(state: &str, is_paused: bool) -> String {
-    if (is_paused) { return "PA".to_string(); }
+/// state label that optionally substitutes nerd font icons for the ascii
+/// short codes. when nerd_font is false the result is plain ascii so users
+/// without a nerd-font-aware terminal don't see tofu boxes.
+fn format_state_with(state: &str, is_paused: bool, nerd_font: bool) -> String {
+    if (is_paused) {
+        return if (nerd_font) { "\u{f04c}".to_string() } else { "PA".to_string() };
+    }
+    if (nerd_font) {
+        return match state {
+            "downloading" => "\u{f019}".to_string(),
+            "seeding" => "\u{f093}".to_string(),
+            "finished" => "\u{f00c}".to_string(),
+            "downloading_metadata" => "\u{f1ce}".to_string(),
+            "checking_files" | "checking_resume_data" => "\u{f021}".to_string(),
+            "allocating" => "\u{f0c7}".to_string(),
+            other => other.chars().take(2).collect::<String>().to_uppercase(),
+        };
+    }
     match state {
         "downloading" => "DL".to_string(),
         "seeding" => "SE".to_string(),

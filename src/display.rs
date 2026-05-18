@@ -210,11 +210,23 @@ fn print_categories(entries: &[CategoryInfo]) {
     }
 }
 
-fn truncate(string: &str, max_chars: usize) -> String {
-    let chars: Vec<char> = string.chars().collect();
-    if (chars.len() <= max_chars) {
-        string.to_string()
-    } else {
-        format!("{}…", chars[..max_chars.saturating_sub(1)].iter().collect::<String>())
+/// truncate to a display-width budget (cells, not chars). CJK / emoji /
+/// combining marks are accounted for via unicode-width so columns don't
+/// shift when the data contains wide characters. an ellipsis (1 cell) is
+/// appended when truncation actually happened.
+fn truncate(string: &str, max_cells: usize) -> String {
+    use unicode_width::UnicodeWidthChar;
+    let total: usize = string.chars().map(|c| UnicodeWidthChar::width(c).unwrap_or(0)).sum();
+    if (total <= max_cells) { return string.to_string(); }
+    let budget = max_cells.saturating_sub(1); // reserve one cell for the ellipsis
+    let mut accumulated = 0usize;
+    let mut output = String::new();
+    for character in string.chars() {
+        let width = UnicodeWidthChar::width(character).unwrap_or(0);
+        if (accumulated + width > budget) { break; }
+        output.push(character);
+        accumulated += width;
     }
+    output.push('…');
+    output
 }
