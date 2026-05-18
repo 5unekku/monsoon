@@ -4,12 +4,18 @@ use crate::bridge::ffi::{
 };
 use anyhow::{Context, Result};
 
-const ALERT_STATUS: i32 = 0x1;
-const ALERT_ERROR: i32 = 0x2;
-const ALERT_PORT_MAPPING: i32 = 0x8;
-const ALERT_STORAGE: i32 = 0x10;
-const ALERT_TRACKER: i32 = 0x20;
-const ALERT_PROGRESS: i32 = 0x80;
+// alert category bits — must match libtorrent/alert.hpp. these are bit indices
+// (1 << N), not arbitrary masks. previous values were off-by-one across the
+// board, which silently subscribed us to peer/connect (firehose) and never
+// delivered status_notification at all.
+const ALERT_ERROR: i32 = 1 << 0;
+const ALERT_PEER: i32 = 1 << 1;
+const ALERT_PORT_MAPPING: i32 = 1 << 2;
+const ALERT_STORAGE: i32 = 1 << 3;
+const ALERT_TRACKER: i32 = 1 << 4;
+const ALERT_CONNECT: i32 = 1 << 5;
+const ALERT_STATUS: i32 = 1 << 6;
+const ALERT_PROGRESS: i32 = 1 << 7;
 
 pub struct Session {
     inner: cxx::UniquePtr<ffi::session>,
@@ -29,8 +35,13 @@ impl Session {
         } else {
             format!("{}:{}", config.listen_address, config.listen_port)
         };
-        let alert_mask = ALERT_STATUS | ALERT_ERROR | ALERT_TRACKER
-            | ALERT_STORAGE | ALERT_PROGRESS | ALERT_PORT_MAPPING;
+        // subscribe only to what we actually consume. progress / peer / connect
+        // are firehose categories (block_downloading, peer_connect, etc.) and
+        // would overflow the alert queue between our 500ms drains — we don't
+        // use them since rates and peer counts come from polled status().
+        let alert_mask = ALERT_ERROR | ALERT_STATUS | ALERT_STORAGE
+            | ALERT_TRACKER | ALERT_PORT_MAPPING;
+        let _ = (ALERT_PEER, ALERT_CONNECT, ALERT_PROGRESS); // reserved for future use
         let settings = config_to_settings(config);
         let inner = ffi::bridge_create_session(
             listen,
