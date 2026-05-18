@@ -245,6 +245,12 @@ impl StatusFilter {
 enum FieldKind {
     Bool,
     Integer,
+    /// integer with three meaningful states displayed differently:
+    /// -1 = "∞ unlimited", 0 = "0 (none allowed)", 1+ = literal count.
+    /// used for max_active_* (libtorrent accepts -1 directly) and the
+    /// connection caps max_connections / max_uploads (where session.rs
+    /// maps -1 → 65535 for libtorrent).
+    IntegerUnlimited,
     Float,
     Text,
     /// dropdown of fixed string options; enter cycles to the next one
@@ -353,16 +359,16 @@ const SETTING_FIELDS: &[SettingField] = &[
         section: "connection",
         key: "max_connections",
         label: "max connections",
-        description: "global peer connection ceiling.",
-        kind: FieldKind::Integer,
+        description: "global peer connection ceiling. -1 means unlimited; 0 means none allowed.",
+        kind: FieldKind::IntegerUnlimited,
         restart_required: false,
     },
     SettingField {
         section: "connection",
         key: "max_uploads",
         label: "max upload slots",
-        description: "global upload slot ceiling. -1 means unlimited.",
-        kind: FieldKind::Integer,
+        description: "global upload slot ceiling. -1 means unlimited; 0 means none allowed.",
+        kind: FieldKind::IntegerUnlimited,
         restart_required: false,
     },
     SettingField {
@@ -421,24 +427,24 @@ const SETTING_FIELDS: &[SettingField] = &[
         section: "limits",
         key: "max_active_downloads",
         label: "max active downloads",
-        description: "concurrent active downloads.",
-        kind: FieldKind::Integer,
+        description: "concurrent active downloads. -1 = unlimited; 0 = none allowed (queue but never start); 1+ = literal cap.",
+        kind: FieldKind::IntegerUnlimited,
         restart_required: false,
     },
     SettingField {
         section: "limits",
         key: "max_active_uploads",
         label: "max active uploads",
-        description: "concurrent active uploads/seeds.",
-        kind: FieldKind::Integer,
+        description: "concurrent active uploads/seeds. -1 = unlimited; 0 = none allowed; 1+ = literal cap.",
+        kind: FieldKind::IntegerUnlimited,
         restart_required: false,
     },
     SettingField {
         section: "limits",
         key: "max_active_torrents",
         label: "max active torrents",
-        description: "concurrent active torrents (downloads + uploads).",
-        kind: FieldKind::Integer,
+        description: "concurrent active torrents (downloads + uploads). -1 = unlimited; 0 = none allowed; 1+ = literal cap.",
+        kind: FieldKind::IntegerUnlimited,
         restart_required: false,
     },
     SettingField {
@@ -2345,7 +2351,10 @@ fn activate_field(settings: &mut SettingsState) {
             let next = options[(position + 1) % options.len()];
             commit_value(settings, field.key, next);
         }
-        FieldKind::Integer | FieldKind::Float | FieldKind::Text => {
+        FieldKind::Integer
+        | FieldKind::IntegerUnlimited
+        | FieldKind::Float
+        | FieldKind::Text => {
             settings.edit_buffer = Some(current);
         }
     }
@@ -2511,6 +2520,14 @@ fn render_value(settings: &SettingsState, index: usize, value: &str) -> String {
         }
         FieldKind::Bool => {
             if (value == "true") { "● on".to_string() } else { "○ off".to_string() }
+        }
+        FieldKind::IntegerUnlimited => {
+            match value.parse::<i32>() {
+                Ok(-1) => "∞  unlimited".to_string(),
+                Ok(0) => "0  (none allowed)".to_string(),
+                Ok(other) => other.to_string(),
+                Err(_) => value.to_string(),
+            }
         }
         _ => value.to_string(),
     }

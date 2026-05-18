@@ -248,9 +248,12 @@ impl Config {
         // fields where 0 = unlimited, negatives reset to default
         if (self.download_rate_limit < 0) { self.download_rate_limit = default.download_rate_limit; }
         if (self.upload_rate_limit < 0) { self.upload_rate_limit = default.upload_rate_limit; }
-        if (self.max_active_downloads < 0) { self.max_active_downloads = default.max_active_downloads; }
-        if (self.max_active_uploads < 0) { self.max_active_uploads = default.max_active_uploads; }
-        if (self.max_active_torrents < 0) { self.max_active_torrents = default.max_active_torrents; }
+        // max_active_*: -1 = unlimited (libtorrent's sentinel), 0 = none allowed
+        // (queue everything; nothing starts), 1+ = literal cap. only values < -1
+        // are invalid and reset to default.
+        if (self.max_active_downloads < -1) { self.max_active_downloads = default.max_active_downloads; }
+        if (self.max_active_uploads < -1) { self.max_active_uploads = default.max_active_uploads; }
+        if (self.max_active_torrents < -1) { self.max_active_torrents = default.max_active_torrents; }
         if (self.seed_ratio_limit < 0.0) { self.seed_ratio_limit = default.seed_ratio_limit; }
         if (self.seed_time_limit < 0) { self.seed_time_limit = default.seed_time_limit; }
 
