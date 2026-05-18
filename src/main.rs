@@ -10,6 +10,7 @@ mod ipc;
 mod network;
 mod server;
 mod session;
+mod sources;
 mod tui;
 
 use anyhow::Result;

@@ -206,15 +206,68 @@ impl Default for Config {
 }
 
 impl Config {
+    /// load, sanitize, and immediately rewrite the config so every key is
+    /// always present + valid. on first run this materialises a complete
+    /// config.toml from `Config::default`. on subsequent runs it heals
+    /// out-of-range numerics + unknown enums and ensures no field is
+    /// missing.
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
-        if (path.exists()) {
+        let mut config: Self = if (path.exists()) {
             let content = std::fs::read_to_string(&path).context("read config")?;
-            toml::from_str(&content).context("parse config")
+            // serde's #[serde(default)] on the struct fills in any missing keys
+            toml::from_str(&content).context("parse config")?
         } else {
-            let config = Config::default();
-            config.save()?;
-            Ok(config)
+            Self::default()
+        };
+        config.sanitize();
+        // always rewrite so the on-disk file is canonical (no missing keys,
+        // no invalid numerics). costs one fs::write per daemon start.
+        let _ = config.save();
+        Ok(config)
+    }
+
+    /// clamp every numeric field to a valid range and validate enum-shaped
+    /// strings against their accepted values. negative values other than -1
+    /// reset to the field's default. -1 is preserved only on fields where
+    /// "infinite" makes sense.
+    pub fn sanitize(&mut self) {
+        let default = Self::default();
+        // fields where -1 OR 0 mean "unlimited" (libtorrent accepts both)
+        if (self.max_connections < -1) { self.max_connections = default.max_connections; }
+        if (self.max_uploads < -1) { self.max_uploads = default.max_uploads; }
+        // fields where 0 = unlimited, negatives reset to default
+        if (self.download_rate_limit < 0) { self.download_rate_limit = default.download_rate_limit; }
+        if (self.upload_rate_limit < 0) { self.upload_rate_limit = default.upload_rate_limit; }
+        if (self.max_active_downloads < 0) { self.max_active_downloads = default.max_active_downloads; }
+        if (self.max_active_uploads < 0) { self.max_active_uploads = default.max_active_uploads; }
+        if (self.max_active_torrents < 0) { self.max_active_torrents = default.max_active_torrents; }
+        if (self.seed_ratio_limit < 0.0) { self.seed_ratio_limit = default.seed_ratio_limit; }
+        if (self.seed_time_limit < 0) { self.seed_time_limit = default.seed_time_limit; }
+
+        // enum-shaped strings
+        if (!matches!(self.encryption_mode.as_str(), "enabled" | "forced" | "disabled")) {
+            self.encryption_mode = default.encryption_mode.clone();
+        }
+        if (!matches!(
+            self.proxy_type.as_str(),
+            "none" | "socks4" | "socks5" | "socks5_pw" | "http" | "http_pw" | "i2p"
+        )) {
+            self.proxy_type = default.proxy_type.clone();
+        }
+
+        // tui sanity
+        if (self.tui_sidebar_width < 8) { self.tui_sidebar_width = default.tui_sidebar_width; }
+        if (self.tui_detail_split_percent < 10 || self.tui_detail_split_percent > 90) {
+            self.tui_detail_split_percent = default.tui_detail_split_percent;
+        }
+
+        // listen_address must be non-empty (libtorrent bails otherwise)
+        if (self.listen_address.trim().is_empty()) {
+            self.listen_address = default.listen_address.clone();
+        }
+        if (self.default_save_path.trim().is_empty()) {
+            self.default_save_path = default.default_save_path.clone();
         }
     }
 

@@ -583,12 +583,25 @@ enum Mode {
 struct Prompt {
     title: String,
     helper: String,
-    buffer: String,
+    /// one line per item. most prompts use a single line; the add-torrent
+    /// prompt uses shift+enter to add additional lines for bulk submission.
+    lines: Vec<String>,
+    /// index of the line being edited
+    cursor_line: usize,
     /// the request to send when the user submits. takes the buffer as argument
     /// and produces an ipc Request.
     action: PromptAction,
     /// torrent the action targets (so the prompt remembers it across redraws)
     torrent_index: usize,
+    /// when true, shift+enter splits the line into two. on false (single-line
+    /// prompts like rename/move) shift+enter is ignored.
+    allow_multiline: bool,
+}
+
+impl Prompt {
+    fn single_line_buffer(&self) -> String {
+        self.lines.get(0).cloned().unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -832,9 +845,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
 /// returns true when the tui should exit.
 fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
     match (code, modifiers) {
-        (KeyCode::Char('q'), KeyModifiers::NONE)
-        | (KeyCode::Char('q'), KeyModifiers::CONTROL)
-        | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        // quit is ctrl+c only (standard). lowercase q is the sidebar toggle
+        // below; never bind it to quit.
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
 
         // wasd + arrows. j/k are intentionally not bound.
         (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => state.move_focused(1),
@@ -845,18 +858,17 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Char('a'), KeyModifiers::NONE) | (KeyCode::Left, _) => collapse_focused(state, true),
         (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Right, _) => collapse_focused(state, false),
 
-        // pane cycling + visibility toggles
+        // pane cycling + visibility toggles. q+e sit on the QWE row just
+        // above wasd so neither hand has to leave the home position.
         (KeyCode::Tab, _) => state.cycle_focus(),
-        (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
+        (KeyCode::Char('q'), KeyModifiers::NONE) => {
             state.show_sidebar = !state.show_sidebar;
-            // collapsing the focused pane drops focus back to the list
             if (!state.show_sidebar && state.focus == Pane::Sidebar) { state.focus = Pane::List; }
         }
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+        (KeyCode::Char('e'), KeyModifiers::NONE) => {
             state.show_detail = !state.show_detail;
             if (!state.show_detail && state.focus == Pane::Detail) { state.focus = Pane::List; }
             if (state.show_detail) {
-                // force an immediate fetch so the pane isn't blank
                 state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
             }
         }
@@ -905,9 +917,11 @@ fn open_rename_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: format!("rename torrent #{}", index),
         helper: "files inside are not renamed; use the content tab + F2 for individual files".to_string(),
-        buffer: current,
+        lines: vec![current],
+        cursor_line: 0,
         action: PromptAction::RenameTorrent,
         torrent_index: index,
+        allow_multiline: false,
     });
 }
 
@@ -921,20 +935,23 @@ fn open_move_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: format!("move torrent #{} — new save directory", index),
         helper: "absolute path. files will be moved on disk by libtorrent.".to_string(),
-        buffer: current,
+        lines: vec![current],
+        cursor_line: 0,
         action: PromptAction::MoveTorrent,
         torrent_index: index,
+        allow_multiline: false,
     });
 }
 
 fn open_add_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
-        title: "add torrent".to_string(),
-        helper: "magnet uri or absolute path to .torrent file".to_string(),
-        buffer: String::new(),
+        title: "add torrent (shift+enter to add another line)".to_string(),
+        helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, or ~/foo.torrent — one per line".to_string(),
+        lines: vec![String::new()],
+        cursor_line: 0,
         action: PromptAction::AddTorrent,
-        // index is ignored for add
         torrent_index: 0,
+        allow_multiline: true,
     });
 }
 
@@ -994,18 +1011,15 @@ fn toggle_sequential(state: &mut AppState) {
 fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
     match prompt.action {
         PromptAction::RenameTorrent => {
-            // for now we don't support renaming the torrent itself (only files
-            // and folders inside it, via the existing rename ipc). surface the
-            // limitation explicitly rather than silently doing nothing.
             Err(anyhow::anyhow!(
                 "renaming the torrent name itself is not yet wired. \
-                 use the content tab (ctrl+d, ]) and F2 to rename individual files."
+                 use the content tab (e, ]) and F2 to rename individual files."
             ))
         }
         PromptAction::MoveTorrent => {
             match client::send(Request::Move {
                 index: prompt.torrent_index,
-                new_save_path: prompt.buffer.clone(),
+                new_save_path: prompt.single_line_buffer(),
             })? {
                 Response::Ok => Ok(()),
                 Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
@@ -1013,17 +1027,39 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             }
         }
         PromptAction::AddTorrent => {
-            match client::send(Request::Add {
-                uri: prompt.buffer.clone(),
-                save_path: None,
-                category: None,
-            })? {
-                Response::Added { id } => {
-                    state.error = Some(format!("added torrent {}", id));
-                    Ok(())
+            // every non-blank line dispatches a separate Add. errors are
+            // collected so a single bad line doesn't abort the batch.
+            let mut succeeded: Vec<String> = Vec::new();
+            let mut failed: Vec<String> = Vec::new();
+            for line in &prompt.lines {
+                let item = line.trim();
+                if (item.is_empty()) { continue; }
+                let response = client::send(Request::Add {
+                    uri: item.to_string(),
+                    save_path: None,
+                    category: None,
+                });
+                match response {
+                    Ok(Response::Added { id }) => succeeded.push(id),
+                    Ok(Response::Err(message)) => failed.push(format!("{}: {}", item, message)),
+                    Ok(_) => failed.push(format!("{}: unexpected response", item)),
+                    Err(error) => failed.push(format!("{}: {}", item, error)),
                 }
-                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
-                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
+            if (succeeded.is_empty() && failed.is_empty()) {
+                return Err(anyhow::anyhow!("no sources provided"));
+            }
+            if (failed.is_empty()) {
+                state.error = Some(format!("added {} torrent(s)", succeeded.len()));
+                Ok(())
+            } else if (succeeded.is_empty()) {
+                Err(anyhow::anyhow!("all sources failed: {}", failed.join("; ")))
+            } else {
+                state.error = Some(format!(
+                    "added {} ok, {} failed: {}",
+                    succeeded.len(), failed.len(), failed.join("; ")
+                ));
+                Ok(())
             }
         }
     }
@@ -1033,6 +1069,17 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
         (KeyCode::Esc, _) => state.prompt = None,
+        // shift+enter inserts a new line in multi-line prompts; plain enter
+        // always submits (consistent with the rest of the app).
+        (KeyCode::Enter, KeyModifiers::SHIFT) => {
+            if let Some(prompt) = state.prompt.as_mut() {
+                if (prompt.allow_multiline) {
+                    let insert_at = prompt.cursor_line + 1;
+                    prompt.lines.insert(insert_at, String::new());
+                    prompt.cursor_line = insert_at;
+                }
+            }
+        }
         (KeyCode::Enter, _) => {
             if let Some(prompt) = state.prompt.take() {
                 match submit_prompt(&prompt, state) {
@@ -1042,20 +1089,43 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
                     }
                     Err(error) => {
                         state.error = Some(error.to_string());
-                        // put the prompt back so the user can correct + retry
                         state.prompt = Some(prompt);
                     }
                 }
             }
         }
+        (KeyCode::Up, _) => {
+            if let Some(prompt) = state.prompt.as_mut() {
+                prompt.cursor_line = prompt.cursor_line.saturating_sub(1);
+            }
+        }
+        (KeyCode::Down, _) => {
+            if let Some(prompt) = state.prompt.as_mut() {
+                prompt.cursor_line = (prompt.cursor_line + 1).min(prompt.lines.len().saturating_sub(1));
+            }
+        }
         (KeyCode::Backspace, _) => {
-            if let Some(prompt) = state.prompt.as_mut() { prompt.buffer.pop(); }
+            if let Some(prompt) = state.prompt.as_mut() {
+                let cursor = prompt.cursor_line;
+                let line_empty = prompt.lines.get(cursor).map(|line| line.is_empty()).unwrap_or(true);
+                if (line_empty && cursor > 0 && prompt.lines.len() > 1) {
+                    // backspace at the start of an empty line removes the line
+                    prompt.lines.remove(cursor);
+                    prompt.cursor_line = cursor - 1;
+                } else if let Some(line) = prompt.lines.get_mut(cursor) {
+                    line.pop();
+                }
+            }
         }
         (KeyCode::Char(character), modifiers)
             if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
         {
-            if let Some(prompt) = state.prompt.as_mut() { prompt.buffer.push(character); }
+            if let Some(prompt) = state.prompt.as_mut() {
+                if let Some(line) = prompt.lines.get_mut(prompt.cursor_line) {
+                    line.push(character);
+                }
+            }
         }
         _ => {}
     }
@@ -1391,14 +1461,15 @@ fn draw_column_picker(frame: &mut ratatui::Frame, state: &AppState) {
 fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
     let Some(prompt) = &state.prompt else { return; };
     let area = frame.area();
-    // center a 70%-wide, 7-tall box
+    // height grows with the number of lines, clamped to the available area
+    let line_count = prompt.lines.len().max(1) as u16;
+    let body_height = line_count.min(12);
+    let height = (body_height + 5).min(area.height.saturating_sub(2));
     let width = (area.width * 70 / 100).clamp(40, area.width.saturating_sub(4));
-    let height: u16 = 7;
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
     let modal = Rect { x, y, width, height };
 
-    // clear underneath so the previous frame doesn't bleed through
     frame.render_widget(ratatui::widgets::Clear, modal);
 
     let block = Block::default()
@@ -1410,11 +1481,10 @@ fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
     frame.render_widget(block, modal);
 
     let layout = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Min(0),
-        Constraint::Length(1),
+        Constraint::Length(1),         // helper
+        Constraint::Length(1),         // gap
+        Constraint::Min(body_height),  // text buffer (one row per line)
+        Constraint::Length(1),         // hint
     ])
     .split(inner);
 
@@ -1425,23 +1495,43 @@ fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
         ))),
         layout[0],
     );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled("› ", Style::default().fg(Color::Yellow)),
-            Span::raw(prompt.buffer.as_str()),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
-        ])),
-        layout[2],
-    );
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
+
+    let body_lines: Vec<Line> = prompt.lines.iter().enumerate().map(|(index, content)| {
+        let is_cursor = index == prompt.cursor_line;
+        let marker = if (is_cursor) { "› " } else { "  " };
+        let mut spans = vec![
+            Span::styled(marker, Style::default().fg(Color::Yellow)),
+            Span::raw(content.as_str()),
+        ];
+        if (is_cursor) {
+            spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
+        }
+        Line::from(spans)
+    }).collect();
+    frame.render_widget(Paragraph::new(body_lines), layout[2]);
+
+    let hint = if (prompt.allow_multiline) {
+        Line::from(vec![
+            Span::styled(" enter ", Style::default().fg(Color::Yellow)),
+            Span::raw("submit  "),
+            Span::styled("shift+enter ", Style::default().fg(Color::Yellow)),
+            Span::raw("new line  "),
+            Span::styled("↑↓ ", Style::default().fg(Color::Yellow)),
+            Span::raw("move  "),
+            Span::styled("esc ", Style::default().fg(Color::Yellow)),
+            Span::raw("cancel"),
+        ])
+    } else {
+        Line::from(vec![
             Span::styled(" enter ", Style::default().fg(Color::Yellow)),
             Span::raw("submit  "),
             Span::styled("esc ", Style::default().fg(Color::Yellow)),
             Span::raw("cancel"),
-        ]))
-        .style(Style::default().fg(Color::Gray)),
-        layout[4],
+        ])
+    };
+    frame.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::Gray)),
+        layout[3],
     );
 }
 
@@ -1961,11 +2051,11 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("recheck  "),
         Span::styled("T ", Style::default().fg(Color::Yellow)),
         Span::raw("reann  "),
-        Span::styled("^b/^d ", Style::default().fg(Color::Yellow)),
-        Span::raw("panes  "),
+        Span::styled("q/e ", Style::default().fg(Color::Yellow)),
+        Span::raw("sidebar/detail  "),
         Span::styled(", ", Style::default().fg(Color::Yellow)),
         Span::raw("settings  "),
-        Span::styled("q ", Style::default().fg(Color::Yellow)),
+        Span::styled("^c ", Style::default().fg(Color::Yellow)),
         Span::raw("quit"),
     ]);
     frame.render_widget(

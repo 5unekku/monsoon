@@ -169,9 +169,14 @@ fn config_to_settings(config: &crate::config::Config) -> SessionSettings {
         "disabled" => 2,
         _ => 1, // "enabled" = prefer
     };
+    // -1 in our config means "unlimited" — libtorrent treats large positive
+    // ints as effectively unlimited; mapping to i32::MAX would risk overflow
+    // when libtorrent adds the value to a counter, so use a safely large cap.
+    let max_connections = if (config.max_connections == -1) { 65535 } else { config.max_connections };
+    let max_uploads = if (config.max_uploads == -1) { 65535 } else { config.max_uploads };
     SessionSettings {
-        max_uploads: config.max_uploads,
-        max_connections: config.max_connections,
+        max_uploads,
+        max_connections,
         download_rate_limit: config.download_rate_limit * 1024,
         upload_rate_limit: config.upload_rate_limit * 1024,
         enable_dht: config.enable_dht,

@@ -661,13 +661,21 @@ impl App {
                 }
             }
             Request::Add { uri, save_path, category } => {
-                let result = if (uri.starts_with("magnet:")) {
-                    self.add_magnet(&uri, save_path.as_deref(), category.as_deref())
-                } else {
-                    self.add_file(&uri, save_path.as_deref(), category.as_deref())
-                };
-                match result {
-                    Ok(hash) => Response::Added { id: hash },
+                // delegate scheme + path resolution to the sources module so
+                // http/https/ftp/sftp urls and ~ expansion work uniformly.
+                match crate::sources::resolve(&uri) {
+                    Ok(crate::sources::Source::Magnet(magnet)) => {
+                        match self.add_magnet(&magnet, save_path.as_deref(), category.as_deref()) {
+                            Ok(hash) => Response::Added { id: hash },
+                            Err(error) => Response::Err(error.to_string()),
+                        }
+                    }
+                    Ok(crate::sources::Source::File(path)) => {
+                        match self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref()) {
+                            Ok(hash) => Response::Added { id: hash },
+                            Err(error) => Response::Err(error.to_string()),
+                        }
+                    }
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
