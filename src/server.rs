@@ -167,7 +167,7 @@ impl App {
         let info_hash = handle.info_hash();
         // evaluate auto-tag rules against whatever we know now (name from
         // status, no trackers yet for magnets). retagging happens later on
-        // metadata-received via `rustor retag`.
+        // metadata-received via `monsoon retag`.
         let status = handle.status();
         let trackers = handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
         let auto_tags = self.tag_rules.evaluate(&status.name, status.total_wanted, &trackers);
@@ -947,7 +947,7 @@ struct NetworkState {
 
 /// build the network listener when configured. side effect: may generate a
 /// self-signed cert and a random auth token, persisting both to config.toml
-/// on first start so a follow-up `rustor` invocation can read them back.
+/// on first start so a follow-up `monsoon` invocation can read them back.
 fn setup_network_listener(config: &mut Config) -> Result<Option<NetworkState>> {
     if (config.network_listen_address.trim().is_empty()) {
         return Ok(None);
@@ -955,7 +955,7 @@ fn setup_network_listener(config: &mut Config) -> Result<Option<NetworkState>> {
     let tls_config = network::ensure_tls_material(config).context("tls material")?;
     if (config.network_auth_token.is_empty()) {
         config.network_auth_token = network::generate_token();
-        tracing::info!("generated network auth token (see config.toml or RUSTOR_TOKEN)");
+        tracing::info!("generated network auth token (see config.toml or MONSOON_TOKEN)");
     }
     // persist any generated cert paths + token so the next start finds them
     let _ = config.save();
@@ -1058,15 +1058,15 @@ fn spawn_completion_script(
     use std::process::{Command, Stdio};
     let mut command = Command::new(script);
     command
-        .env("RUSTOR_TORRENT_NAME", name)
-        .env("RUSTOR_TORRENT_HASH", hash)
-        .env("RUSTOR_SAVE_PATH", save_path)
-        .env("RUSTOR_TOTAL_SIZE", total_size.to_string())
+        .env("MONSOON_TORRENT_NAME", name)
+        .env("MONSOON_TORRENT_HASH", hash)
+        .env("MONSOON_SAVE_PATH", save_path)
+        .env("MONSOON_TOTAL_SIZE", total_size.to_string())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     if let Some(category_name) = category {
-        command.env("RUSTOR_CATEGORY", category_name);
+        command.env("MONSOON_CATEGORY", category_name);
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -1190,7 +1190,7 @@ pub fn run_detached(_quiet: bool) -> Result<()> {
         std::process::Command::new(&binary).arg("daemon").spawn().context("spawn detached daemon")?;
     }
     println!("daemon spawned in background; log: {}", log_path.display());
-    println!("status: rustor status   stop: rustor stop (or kill)");
+    println!("status: monsoon status   stop: monsoon stop (or kill)");
     Ok(())
 }
 
@@ -1209,7 +1209,7 @@ fn write_pidfile() -> Result<std::path::PathBuf> {
                 if (alive) {
                     anyhow::bail!(
                         "another daemon (pid {}) is already running. \
-                         use `rustor stop` first, or remove {} if it's stale",
+                         use `monsoon stop` first, or remove {} if it's stale",
                         existing_pid, path.display()
                     );
                 }
@@ -1223,7 +1223,7 @@ fn write_pidfile() -> Result<std::path::PathBuf> {
 
 
 /// if a daemon is already running, return its pid. used to decide whether to
-/// attach (interactive TTY) or refuse (service/pipe context) on `rustor daemon`.
+/// attach (interactive TTY) or refuse (service/pipe context) on `monsoon daemon`.
 fn existing_daemon_pid() -> Option<i32> {
     let path = Config::pid_path().ok()?;
     let text = std::fs::read_to_string(&path).ok()?;
@@ -1232,13 +1232,13 @@ fn existing_daemon_pid() -> Option<i32> {
 }
 
 /// follow the running daemon's log via `tail -f`. ctrl-c just detaches the
-/// view; the daemon keeps running. used when `rustor daemon` is invoked from
+/// view; the daemon keeps running. used when `monsoon daemon` is invoked from
 /// an interactive shell while another daemon is already up.
 fn attach_to_daemon_log(pid: i32) -> Result<()> {
     let log_path = Config::log_path()?;
     println!("daemon already running (pid {}); attaching to log", pid);
     println!("log: {}", log_path.display());
-    println!("(ctrl-c detaches; daemon keeps running. use `rustor kill` to stop it)");
+    println!("(ctrl-c detaches; daemon keeps running. use `monsoon kill` to stop it)");
     if (!log_path.exists()) {
         // daemon may have been started in the foreground (no log file). just
         // wait for the user to ctrl-c since there's nothing to tail.

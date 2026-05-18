@@ -748,6 +748,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "monsoon"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytesize",
+ "chrono",
+ "clap",
+ "crossterm",
+ "cxx",
+ "cxx-build",
+ "directories",
+ "humantime",
+ "if-addrs",
+ "ratatui",
+ "rcgen",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "unicode-width 0.2.0",
+ "windows-sys 0.61.2",
+ "winreg",
+]
+
+[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1005,35 +1034,6 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "untrusted",
-]
-
-[[package]]
-name = "rustor"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytesize",
- "chrono",
- "clap",
- "crossterm",
- "cxx",
- "cxx-build",
- "directories",
- "humantime",
- "if-addrs",
- "ratatui",
- "rcgen",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "signal-hook",
- "toml",
- "tracing",
- "tracing-subscriber",
- "unicode-width 0.2.0",
- "windows-sys 0.61.2",
- "winreg",
 ]
 
 [[package]]

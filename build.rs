@@ -10,7 +10,7 @@ fn main() {
         .flag_if_supported("-Wno-maybe-uninitialized")
         .include("/usr/include")
         .include(&src_dir)
-        .compile("rustor-bridge");
+        .compile("monsoon-bridge");
 
     println!("cargo:rerun-if-changed=src/bridge.rs");
     println!("cargo:rerun-if-changed=src/bridge.h");

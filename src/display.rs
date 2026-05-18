@@ -199,7 +199,7 @@ fn format_state(state: &str, is_paused: bool) -> String {
 
 fn print_categories(entries: &[CategoryInfo]) {
     if (entries.is_empty()) {
-        println!("no categories configured (use `rustor category set <name> <path>`)");
+        println!("no categories configured (use `monsoon category set <name> <path>`)");
         return;
     }
     println!("{:<16} {:<48} {:>6} tags", "name", "save path", "count");

@@ -49,7 +49,7 @@ pub fn ensure_tls_material(config: &mut Config) -> Result<Arc<ServerConfig>> {
 fn generate_self_signed(cert_path: &Path, key_path: &Path) -> Result<()> {
     let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
     params.distinguished_name = rcgen::DistinguishedName::new();
-    params.distinguished_name.push(rcgen::DnType::CommonName, "rustor-network");
+    params.distinguished_name.push(rcgen::DnType::CommonName, "monsoon-network");
     let key_pair = rcgen::KeyPair::generate()?;
     let cert = params.self_signed(&key_pair)?;
     std::fs::write(cert_path, cert.pem()).context("write cert")?;
@@ -152,7 +152,7 @@ impl AuthedConnection {
 impl Config {
     /// dedicated dir for tls material (sibling of config.toml)
     pub fn config_dir_for_tls() -> Result<PathBuf> {
-        let proj = directories::ProjectDirs::from("com", "rustor", "rustor")
+        let proj = directories::ProjectDirs::from("com", "monsoon", "monsoon")
             .context("locate project dirs")?;
         Ok(proj.config_dir().to_path_buf().join("tls"))
     }

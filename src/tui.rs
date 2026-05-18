@@ -1891,7 +1891,7 @@ fn focus_border_style(focused: bool) -> Style {
 fn draw_title(frame: &mut ratatui::Frame, area: Rect) {
     let title = Line::from(vec![
         Span::styled(
-            " rustor ",
+            " monsoon ",
             Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray),
         ),
         Span::raw(" "),

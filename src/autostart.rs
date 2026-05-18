@@ -7,13 +7,13 @@ pub fn enable() -> Result<()> {
     // Basic cross-desktop XDG implementation
     let autostart_dir = directories::BaseDirs::new().unwrap().config_dir().join("autostart");
     std::fs::create_dir_all(&autostart_dir).ok();
-    let desktop_file = autostart_dir.join("rustor.desktop");
+    let desktop_file = autostart_dir.join("monsoon.desktop");
 
     let exec_path = std::env::current_exe()?;
     let content = format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=rustor\n\
+         Name=monsoon\n\
          Exec={} daemon --quiet\n\
          Hidden=false\n\
          NoDisplay=false\n\
@@ -28,7 +28,7 @@ pub fn enable() -> Result<()> {
 #[cfg(unix)]
 pub fn disable() -> Result<()> {
     let autostart_dir = directories::BaseDirs::new().unwrap().config_dir().join("autostart");
-    let desktop_file = autostart_dir.join("rustor.desktop");
+    let desktop_file = autostart_dir.join("monsoon.desktop");
     if desktop_file.exists() {
         std::fs::remove_file(desktop_file)?;
         println!("removed XDG autostart entry");
@@ -49,8 +49,8 @@ pub fn enable() -> Result<()> {
 
     let exec_path = std::env::current_exe()?;
     let cmd = format!("\"{}\" daemon --quiet", exec_path.display());
-    run.set_value("rustor", &cmd)?;
-    println!("added rustor to registry autostart");
+    run.set_value("monsoon", &cmd)?;
+    println!("added monsoon to registry autostart");
     Ok(())
 }
 
@@ -65,7 +65,7 @@ pub fn disable() -> Result<()> {
         KEY_SET_VALUE,
     )?;
 
-    let _ = run.delete_value("rustor");
-    println!("removed rustor from registry autostart");
+    let _ = run.delete_value("monsoon");
+    println!("removed monsoon from registry autostart");
     Ok(())
 }

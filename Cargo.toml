@@ -1,5 +1,5 @@
 [package]
-name = "rustor"
+name = "monsoon"
 version = "0.1.0"
 edition = "2021"
 description = "torrent client daemon and cli, built on libtorrent-rasterbar"

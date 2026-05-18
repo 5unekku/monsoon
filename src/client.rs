@@ -115,7 +115,7 @@ pub fn send_network(server: &str, token: &str, request: Request) -> Result<Respo
 /// rustls client config that trusts ANY server cert. acceptable for the
 /// self-signed model when the transport (ssh tunnel / vpn) is already trusted.
 /// FUTURE: pin the server cert by SPKI hash once we surface it through the
-/// daemon's `rustor status` so users can copy it explicitly.
+/// daemon's `monsoon status` so users can copy it explicitly.
 fn rustls_client_config_insecure() -> rustls::ClientConfig {
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};

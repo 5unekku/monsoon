@@ -1,5 +1,5 @@
 #include "bridge.h"
-#include "rustor/src/bridge.rs.h"
+#include "monsoon/src/bridge.rs.h"
 
 inline rust::String safe_rust_string(const std::string& s) {
     return rustbridge::string_from_lossy(rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()));

@@ -83,7 +83,7 @@ pub fn resolve(input: &str) -> Result<Source> {
     // and TLS validation. fall back to a temp file in std::env::temp_dir().
     if (is_url(trimmed)) {
         let temp = std::env::temp_dir().join(format!(
-            "rustor-fetch-{}.torrent",
+            "monsoon-fetch-{}.torrent",
             std::process::id()
         ));
         let status = std::process::Command::new("curl")

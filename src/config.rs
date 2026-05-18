@@ -99,8 +99,8 @@ pub struct Config {
     #[serde(default)]
     pub watch_directories: Vec<String>,
     /// optional command run when any torrent finishes. invoked with these
-    /// env vars: RUSTOR_TORRENT_NAME, RUSTOR_TORRENT_HASH, RUSTOR_SAVE_PATH,
-    /// RUSTOR_TOTAL_SIZE, RUSTOR_CATEGORY (when set).
+    /// env vars: MONSOON_TORRENT_NAME, MONSOON_TORRENT_HASH, MONSOON_SAVE_PATH,
+    /// MONSOON_TOTAL_SIZE, MONSOON_CATEGORY (when set).
     #[serde(default)]
     pub completion_script: Option<String>,
     /// kill the completion script if it runs longer than this
@@ -299,7 +299,7 @@ impl Config {
     }
 
     fn proj_dirs() -> Result<directories::ProjectDirs> {
-        directories::ProjectDirs::from("com", "rustor", "rustor")
+        directories::ProjectDirs::from("com", "monsoon", "monsoon")
             .context("determine app directories")
     }
 
@@ -319,10 +319,10 @@ impl Config {
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
             let path = PathBuf::from(runtime_dir);
             if (path.exists()) {
-                return Ok(path.join("rustor.sock"));
+                return Ok(path.join("monsoon.sock"));
             }
         }
-        Ok(Self::data_dir()?.join("rustor.sock"))
+        Ok(Self::data_dir()?.join("monsoon.sock"))
     }
 
     pub fn resume_dir() -> Result<PathBuf> {
@@ -350,17 +350,17 @@ impl Config {
         Ok(Self::proj_dirs()?.config_dir().join("rules.toml"))
     }
 
-    /// pidfile location for daemons launched via `rustor daemon --detach`.
-    /// lives alongside the socket so `rustor status` / `rustor kill` find it
+    /// pidfile location for daemons launched via `monsoon daemon --detach`.
+    /// lives alongside the socket so `monsoon status` / `monsoon kill` find it
     /// without consulting the daemon itself.
     pub fn pid_path() -> Result<PathBuf> {
         if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
             let path = PathBuf::from(runtime_dir);
             if (path.exists()) {
-                return Ok(path.join("rustor.pid"));
+                return Ok(path.join("monsoon.pid"));
             }
         }
-        Ok(Self::data_dir()?.join("rustor.pid"))
+        Ok(Self::data_dir()?.join("monsoon.pid"))
     }
 
     /// where stdout/stderr go when the daemon is detached

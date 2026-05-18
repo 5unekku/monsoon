@@ -46,7 +46,7 @@ impl Session {
         let inner = ffi::bridge_create_session(
             listen,
             alert_mask,
-            format!("rustor/{}", crate::VERSION),
+            format!("monsoon/{}", crate::VERSION),
             &settings,
         );
         Ok(Self { inner })

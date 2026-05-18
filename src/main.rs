@@ -23,7 +23,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
 #[command(
-    name = "rustor",
+    name = "monsoon",
     version = VERSION,
     about = "torrent client — runs a background daemon, attach with any subcommand"
 )]
@@ -34,8 +34,8 @@ struct Cli {
     /// example: --server example.com:6890 --token <hex>
     #[arg(long, global = true)]
     server: Option<String>,
-    /// auth token for --server. if omitted, RUSTOR_TOKEN env or
-    /// ~/.config/rustor/token is consulted.
+    /// auth token for --server. if omitted, MONSOON_TOKEN env or
+    /// ~/.config/monsoon/token is consulted.
     #[arg(long, global = true)]
     token: Option<String>,
 }
@@ -50,9 +50,9 @@ enum Commands {
         /// suppress all log output (used when auto-spawned by cli commands)
         #[arg(long)]
         quiet: bool,
-        /// fork into the background, write a pidfile to $XDG_RUNTIME_DIR/rustor,
-        /// and redirect stdout/stderr to $XDG_STATE_HOME/rustor/daemon.log.
-        /// `rustor stop` / `rustor kill` still control it from the same binary.
+        /// fork into the background, write a pidfile to $XDG_RUNTIME_DIR/monsoon,
+        /// and redirect stdout/stderr to $XDG_STATE_HOME/monsoon/daemon.log.
+        /// `monsoon stop` / `monsoon kill` still control it from the same binary.
         #[arg(long)]
         detach: bool,
     },
@@ -64,7 +64,7 @@ enum Commands {
     /// show whether the daemon is running, its pid, socket path, and version
     Status,
 
-    /// send SIGTERM to the running daemon (cleaner than `rustor stop` if the
+    /// send SIGTERM to the running daemon (cleaner than `monsoon stop` if the
     /// ipc socket is wedged)
     Kill,
 
@@ -74,7 +74,7 @@ enum Commands {
 
     /// show detailed info for a torrent
     Info {
-        /// index from `rustor list`
+        /// index from `monsoon list`
         index: usize,
     },
 
@@ -93,7 +93,7 @@ enum Commands {
 
     /// remove a torrent
     Remove {
-        /// index from `rustor list`
+        /// index from `monsoon list`
         index: usize,
         /// also delete downloaded files from disk
         #[arg(short = 'd', long)]
@@ -102,19 +102,19 @@ enum Commands {
 
     /// pause a torrent
     Pause {
-        /// index from `rustor list`
+        /// index from `monsoon list`
         index: usize,
     },
 
     /// resume a paused torrent
     Resume {
-        /// index from `rustor list`
+        /// index from `monsoon list`
         index: usize,
     },
 
     /// force a piece hash recheck
     Recheck {
-        /// index from `rustor list`
+        /// index from `monsoon list`
         index: usize,
     },
 
@@ -132,9 +132,9 @@ enum Commands {
 
     /// rename a single file inside a torrent
     Rename {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
-        /// file index from `rustor info <index>`
+        /// file index from `monsoon info <index>`
         file_index: usize,
         /// new path, relative to the torrent's save_path (subdirs allowed)
         new_name: String,
@@ -143,7 +143,7 @@ enum Commands {
     /// rename a folder inside a torrent by rewriting every file path prefix
     #[command(name = "rename-folder")]
     RenameFolder {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
         /// current folder path prefix (e.g. "Show.Name.S01")
         old_prefix: String,
@@ -153,7 +153,7 @@ enum Commands {
 
     /// move a torrent's save directory (libtorrent moves the files on disk)
     Move {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
         /// absolute path to the new save directory
         new_save_path: String,
@@ -161,15 +161,15 @@ enum Commands {
 
     /// force a tracker re-announce immediately
     Reannounce {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
     },
 
     /// set the download priority for a single file (0 = skip, 4 = normal, 7 = high)
     Priority {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
-        /// file index from `rustor info <index>`
+        /// file index from `monsoon info <index>`
         file_index: usize,
         /// priority 0..=7
         priority: u8,
@@ -177,13 +177,13 @@ enum Commands {
 
     /// print a shareable magnet URI for the torrent
     Magnet {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
     },
 
     /// toggle sequential download (front-to-back piece order, good for streaming)
     Sequential {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
         /// "on" or "off"
         enabled: String,
@@ -191,13 +191,13 @@ enum Commands {
 
     /// replace the tag set on a torrent (space-separated). pass no tags to clear.
     Tags {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
         /// tag names (any number)
         tags: Vec<String>,
     },
 
-    /// re-evaluate ~/.config/rustor/rules.toml against every torrent and
+    /// re-evaluate ~/.config/monsoon/rules.toml against every torrent and
     /// apply matching add_tags. useful after editing rules or after a magnet
     /// has fetched its metadata.
     Retag,
@@ -211,7 +211,7 @@ enum Commands {
     /// pin a torrent's outgoing connections to a specific network interface
     /// (e.g. tun0 for a vpn). pass empty to clear.
     Bind {
-        /// torrent index from `rustor list`
+        /// torrent index from `monsoon list`
         index: usize,
         /// interface name or ip. omit to clear the override.
         interface: Option<String>,
@@ -231,7 +231,7 @@ enum Commands {
 enum CategoryAction {
     /// list all configured categories with their save paths
     List,
-    /// define or update a category (writes ~/.config/rustor/categories.toml)
+    /// define or update a category (writes ~/.config/monsoon/categories.toml)
     Set {
         name: String,
         /// save directory torrents in this category default to
@@ -314,17 +314,17 @@ fn resolve_token(explicit: Option<String>) -> Result<String> {
     if let Some(token) = explicit {
         return Ok(token);
     }
-    if let Ok(token) = std::env::var("RUSTOR_TOKEN") {
+    if let Ok(token) = std::env::var("MONSOON_TOKEN") {
         if (!token.is_empty()) { return Ok(token); }
     }
-    let proj = directories::ProjectDirs::from("com", "rustor", "rustor")
+    let proj = directories::ProjectDirs::from("com", "monsoon", "monsoon")
         .ok_or_else(|| anyhow::anyhow!("locate project dirs"))?;
     let token_path = proj.config_dir().join("token");
     if (token_path.exists()) {
         let token = std::fs::read_to_string(&token_path)?;
         return Ok(token.trim().to_string());
     }
-    anyhow::bail!("no token: pass --token, set RUSTOR_TOKEN, or write {}", token_path.display())
+    anyhow::bail!("no token: pass --token, set MONSOON_TOKEN, or write {}", token_path.display())
 }
 
 fn print_daemon_status() -> Result<()> {
@@ -443,9 +443,9 @@ fn run_service_command(action: ServiceAction) -> Result<()> {
             ServiceAction::Uninstall => uninstall_service(),
             // systemctl status returns 3 when the unit is inactive; that's not an
             // error from the user's perspective. forward the output as-is.
-            ServiceAction::Status => run_systemctl_status(&["--user", "status", "rustor"]),
-            ServiceAction::Enable => run_systemctl(&["--user", "enable", "rustor"]),
-            ServiceAction::Disable => run_systemctl(&["--user", "disable", "rustor"]),
+            ServiceAction::Status => run_systemctl_status(&["--user", "status", "monsoon"]),
+            ServiceAction::Enable => run_systemctl(&["--user", "enable", "monsoon"]),
+            ServiceAction::Disable => run_systemctl(&["--user", "disable", "monsoon"]),
         }
     }
 }
@@ -458,11 +458,11 @@ fn install_service() -> Result<()> {
     let binary = std::env::current_exe().context("locate binary path")?;
     let unit_dir = dirs_for_systemd()?;
     std::fs::create_dir_all(&unit_dir).context("create systemd user unit dir")?;
-    let unit_path = unit_dir.join("rustor.service");
+    let unit_path = unit_dir.join("monsoon.service");
 
     let unit_content = format!(
         "[Unit]\n\
-         Description=rustor torrent daemon\n\
+         Description=monsoon torrent daemon\n\
          After=network.target\n\
          \n\
          [Service]\n\
@@ -481,16 +481,16 @@ fn install_service() -> Result<()> {
     println!("installed: {}", unit_path.display());
 
     run_systemctl(&["--user", "daemon-reload"])?;
-    println!("run `rustor service enable` to start on login");
-    println!("run `rustor service status` to check status");
+    println!("run `monsoon service enable` to start on login");
+    println!("run `monsoon service status` to check status");
     Ok(())
 }
 
 #[cfg(target_os = "linux")]
 fn uninstall_service() -> Result<()> {
     use anyhow::Context;
-    let unit_path = dirs_for_systemd()?.join("rustor.service");
-    let _ = run_systemctl(&["--user", "disable", "--now", "rustor"]);
+    let unit_path = dirs_for_systemd()?.join("monsoon.service");
+    let _ = run_systemctl(&["--user", "disable", "--now", "monsoon"]);
     std::fs::remove_file(&unit_path).context("remove unit file")?;
     run_systemctl(&["--user", "daemon-reload"])?;
     println!("service removed");
