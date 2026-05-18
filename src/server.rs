@@ -608,14 +608,33 @@ impl App {
         }
     }
 
+    /// submit an async save_resume_data for every torrent that has metadata.
+    /// the resulting blobs arrive via `save_resume_data_alert` and are written
+    /// to disk by `drain_pending_resume_data`.
     pub fn save_resume_data(&self) {
         for torrent in &self.torrents {
             if (!torrent.handle.is_valid() || !torrent.handle.status().has_metadata) { continue; }
-            let data = torrent.handle.resume_data();
-            if (data.is_empty()) { continue; }
-            if let Ok(resume_path) = Config::resume_path(&torrent.info_hash) {
-                if let Err(error) = std::fs::write(&resume_path, &data) {
-                    tracing::warn!("failed to save resume for {}: {}", torrent.info_hash, error);
+            torrent.handle.submit_save_resume_data();
+        }
+    }
+
+    /// trigger the async session-stats alert. one of these per poll cycle
+    /// keeps the bridge's snapshot fresh.
+    pub fn post_session_stats(&mut self) {
+        self.session.post_stats();
+    }
+
+    /// drain bencoded resume blobs the bridge collected from
+    /// save_resume_data_alert callbacks and write each to its resume_path.
+    pub fn drain_pending_resume_data(&self) {
+        for pending in self.session.take_pending_resume_data() {
+            if (pending.bytes.is_empty()) { continue; }
+            if let Ok(resume_path) = Config::resume_path(&pending.info_hash) {
+                if let Err(error) = std::fs::write(&resume_path, &pending.bytes) {
+                    tracing::warn!(
+                        "failed to write resume for {}: {}",
+                        pending.info_hash, error
+                    );
                 }
             }
         }
@@ -1291,8 +1310,13 @@ pub fn run(quiet: bool) -> Result<()> {
         if (shutdown.load(Ordering::Relaxed)) { break; }
 
         if (last_alert_check.elapsed() >= Duration::from_millis(500)) {
+            // post_session_stats triggers the next stats alert. process_alerts
+            // then picks it up and updates the bridge's snapshot. drain pending
+            // resume data on the same cadence — they arrive as alerts.
+            app.post_session_stats();
             app.process_alerts();
             app.process_completion_hooks();
+            app.drain_pending_resume_data();
             last_alert_check = Instant::now();
         }
 
@@ -1351,6 +1375,12 @@ pub fn run(quiet: bool) -> Result<()> {
 
     tracing::info!("shutting down, saving resume data");
     app.save_resume_data();
+    // give libtorrent ~1s to deliver save_resume_data_alerts then drain
+    for _ in 0..10 {
+        app.process_alerts();
+        app.drain_pending_resume_data();
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pidfile_path);
     Ok(())

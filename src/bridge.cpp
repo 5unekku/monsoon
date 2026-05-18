@@ -2,14 +2,70 @@
 #include "rustor/src/bridge.rs.h"
 
 #include <fstream>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_map>
+#include <vector>
 
-// suppress deprecated warnings for apis we have to keep using until async
-// session stats and async resume saves are wired up properly
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#include <libtorrent/session_stats.hpp>
 
 namespace rustbridge {
+
+// ─── shared state for the async migrations ─────────────────────────────────
+// session stats and resume data are now pulled asynchronously from alerts.
+// the alert loop populates these structures; reader functions drain them
+// under a mutex.
+
+namespace state {
+    static std::mutex stats_mutex;
+    struct StatsSnapshot {
+        bool initialised = false;
+        // cumulative counters from libtorrent (in bytes / per session)
+        int64_t prev_recv_payload = 0;
+        int64_t prev_sent_payload = 0;
+        // last-snapshot wall-clock for delta calculation
+        std::chrono::steady_clock::time_point prev_time;
+        // last delivered rates (recomputed each alert)
+        int64_t download_rate = 0;
+        int64_t upload_rate = 0;
+        int64_t total_download = 0;
+        int64_t total_upload = 0;
+        int64_t total_dht_nodes = 0;
+        int32_t num_peers = 0;
+    };
+    static StatsSnapshot snapshot;
+
+    // metric indices resolved once at first use
+    static std::mutex metric_mutex;
+    static bool metrics_resolved = false;
+    static int idx_recv_payload = -1;
+    static int idx_sent_payload = -1;
+    static int idx_dht_nodes = -1;
+    static int idx_num_peers_connected = -1;
+
+    static std::mutex resume_mutex;
+    static std::vector<rustbridge::PendingResume> pending_resume;
+
+    static void resolve_metric_indices() {
+        std::lock_guard<std::mutex> lock(metric_mutex);
+        if (metrics_resolved) return;
+        auto metrics = lt::session_stats_metrics();
+        for (auto const &metric : metrics) {
+            std::string name(metric.name);
+            if (name == "net.recv_payload_bytes") idx_recv_payload = metric.value_index;
+            else if (name == "net.sent_payload_bytes") idx_sent_payload = metric.value_index;
+            else if (name == "dht.dht_nodes") idx_dht_nodes = metric.value_index;
+            else if (name == "peer.num_peers_connected") idx_num_peers_connected = metric.value_index;
+        }
+        metrics_resolved = true;
+    }
+}
+
+// suppress deprecated warnings for apis we keep using only inside compat
+// shims (status(), write_resume_data()). new code paths use the async
+// alert-based replacements above.
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -296,6 +352,62 @@ rust::Vec<rustbridge::AlertInfo> bridge_pop_alerts(lt::session &ses) {
     std::vector<lt::alert *> popped;
     ses.pop_alerts(&popped);
     for (auto *a : popped) {
+        // ── session_stats_alert: update the snapshot, derive rates ──
+        if (auto *sa = lt::alert_cast<lt::session_stats_alert>(a)) {
+            state::resolve_metric_indices();
+            auto counters = sa->counters();
+            auto now = std::chrono::steady_clock::now();
+            std::lock_guard<std::mutex> lock(state::stats_mutex);
+            auto &snap = state::snapshot;
+            int64_t recv_payload = (state::idx_recv_payload >= 0)
+                ? counters[state::idx_recv_payload] : 0;
+            int64_t sent_payload = (state::idx_sent_payload >= 0)
+                ? counters[state::idx_sent_payload] : 0;
+            if (snap.initialised) {
+                double dt = std::chrono::duration_cast<std::chrono::duration<double>>(
+                    now - snap.prev_time).count();
+                if (dt > 0.0) {
+                    snap.download_rate = static_cast<int64_t>(
+                        (recv_payload - snap.prev_recv_payload) / dt);
+                    snap.upload_rate = static_cast<int64_t>(
+                        (sent_payload - snap.prev_sent_payload) / dt);
+                }
+            }
+            snap.prev_recv_payload = recv_payload;
+            snap.prev_sent_payload = sent_payload;
+            snap.prev_time = now;
+            snap.total_download = recv_payload;
+            snap.total_upload = sent_payload;
+            if (state::idx_dht_nodes >= 0)
+                snap.total_dht_nodes = counters[state::idx_dht_nodes];
+            if (state::idx_num_peers_connected >= 0)
+                snap.num_peers = static_cast<int32_t>(counters[state::idx_num_peers_connected]);
+            snap.initialised = true;
+            // don't propagate stats alerts further — they're not interesting
+            // to the alert log
+            continue;
+        }
+
+        // ── save_resume_data_alert: stash bencoded blob for Rust pickup ──
+        if (auto *sra = lt::alert_cast<lt::save_resume_data_alert>(a)) {
+            try {
+                auto entry = lt::write_resume_data(sra->params);
+                std::vector<char> buffer;
+                lt::bencode(std::back_inserter(buffer), entry);
+                rustbridge::PendingResume pending;
+                pending.info_hash = rust::String(info_hash_str(sra->handle.info_hashes()).c_str());
+                rust::Vec<uint8_t> bytes;
+                for (char c : buffer) bytes.push_back(static_cast<uint8_t>(c));
+                pending.bytes = std::move(bytes);
+                std::lock_guard<std::mutex> lock(state::resume_mutex);
+                state::pending_resume.push_back(std::move(pending));
+            } catch (...) {
+                // bencoding shouldn't fail; just swallow if it does
+            }
+            continue;
+        }
+
+        // ── regular alerts pass through to the Rust alert log ──
         rustbridge::AlertInfo ai;
         ai.timestamp = a->timestamp().time_since_epoch().count();
         ai.message = rust::String(a->message().c_str());
@@ -314,24 +426,47 @@ rust::Vec<rustbridge::AlertInfo> bridge_pop_alerts(lt::session &ses) {
     return alerts;
 }
 
-// ─── Session Stats ─────────────────────────────────────────────────────────
-// TODO: migrate to async post_session_stats() + session_stats_alert
-// the synchronous session_status() api is deprecated in libtorrent 2.x but
-// the async replacement requires wiring up a stats accumulation loop
+// ─── Session Stats (async) ────────────────────────────────────────────────
+// reads from the bridge-side snapshot populated by session_stats_alert in
+// bridge_pop_alerts. callers must drive bridge_session_post_stats every
+// poll cycle to keep the snapshot fresh.
 
 rustbridge::SessionStats bridge_get_session_stats(const lt::session &ses) {
+    (void)ses;
     rustbridge::SessionStats ss = {};
-    lt::session_status st = ses.status();
-    ss.download_rate = st.download_rate;
-    ss.upload_rate = st.upload_rate;
-    ss.total_download = st.total_download;
-    ss.total_upload = st.total_upload;
-    ss.total_dht_nodes = st.dht_nodes;
-    ss.num_peers = st.num_peers;
-    // dht/lsd/upnp/natpmp running flags are deliberately not populated —
-    // they were dead-read everywhere and would need to come from listen_succeeded
-    // / dht_bootstrap alerts instead. add back if a consumer materializes.
+    std::lock_guard<std::mutex> lock(state::stats_mutex);
+    auto const &snap = state::snapshot;
+    ss.download_rate = snap.download_rate;
+    ss.upload_rate = snap.upload_rate;
+    ss.total_download = snap.total_download;
+    ss.total_upload = snap.total_upload;
+    ss.total_dht_nodes = snap.total_dht_nodes;
+    ss.num_peers = snap.num_peers;
     return ss;
+}
+
+void bridge_session_post_stats(lt::session &ses) {
+    ses.post_session_stats();
+}
+
+void bridge_torrent_save_resume_data_async(const lt::torrent_handle &hdl) {
+    if (!hdl.is_valid()) return;
+    // save_info_dict embeds the .torrent metadata so resume works even if
+    // the original magnet/file is gone. only_if_modified avoids spurious
+    // disk i/o when nothing changed since the last save.
+    hdl.save_resume_data(
+        lt::torrent_handle::save_info_dict
+        | lt::torrent_handle::only_if_modified);
+}
+
+rust::Vec<rustbridge::PendingResume> bridge_take_pending_resume_data() {
+    rust::Vec<rustbridge::PendingResume> result;
+    std::lock_guard<std::mutex> lock(state::resume_mutex);
+    for (auto &item : state::pending_resume) {
+        result.push_back(std::move(item));
+    }
+    state::pending_resume.clear();
+    return result;
 }
 
 // ─── Resume Data ───────────────────────────────────────────────────────────

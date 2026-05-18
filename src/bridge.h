@@ -37,6 +37,7 @@ namespace rustbridge {
     struct TorrentTracker;
     struct SessionStats;
     struct SessionSettings;
+    struct PendingResume;
 
     std::unique_ptr<session> bridge_create_session(
         rust::String listen_interfaces,
@@ -114,4 +115,13 @@ namespace rustbridge {
     // load an ip filter from disk. returns rules-loaded count, or -1 on error.
     int32_t bridge_session_load_ip_filter(session &ses, rust::Str path);
     void bridge_session_clear_ip_filter(session &ses);
+
+    // async session stats: triggers post_session_stats; the resulting alert
+    // updates an internal snapshot read by bridge_get_session_stats.
+    void bridge_session_post_stats(session &ses);
+
+    // async resume save: triggers save_resume_data; the resulting alert
+    // stashes the bencoded blob keyed by info_hash for later drain.
+    void bridge_torrent_save_resume_data_async(const torrent_handle &hdl);
+    rust::Vec<PendingResume> bridge_take_pending_resume_data();
 }

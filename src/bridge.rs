@@ -69,6 +69,14 @@ pub mod ffi {
         pub message: String,
     }
 
+    /// one bencoded resume blob stashed by the bridge after a
+    /// save_resume_data_alert fired. Rust side writes it to disk.
+    #[derive(Debug, Clone)]
+    pub struct PendingResume {
+        pub info_hash: String,
+        pub bytes: Vec<u8>,
+    }
+
     /// session-wide counters from libtorrent. counts of torrents are computed
     /// in the server layer from `App::torrents`, not from libtorrent, so the
     /// per-state torrent counts and the dht/lsd/upnp/natpmp running flags are
@@ -239,5 +247,22 @@ pub mod ffi {
 
         /// clear any active ip filter
         pub fn bridge_session_clear_ip_filter(ses: Pin<&mut session>);
+
+        // ─── async session stats migration ─────────────────────────────────
+        // post_session_stats triggers a session_stats_alert which the bridge
+        // accumulates internally. fetch the latest snapshot via the existing
+        // bridge_get_session_stats (which now reads from the accumulator
+        // instead of calling the deprecated ses.status()).
+        pub fn bridge_session_post_stats(ses: Pin<&mut session>);
+
+        // ─── async resume data migration ───────────────────────────────────
+        // submit an async save_resume_data() for this torrent. the result
+        // arrives via save_resume_data_alert and is stashed in the bridge.
+        pub fn bridge_torrent_save_resume_data_async(hdl: &torrent_handle);
+
+        // drain the bridge's pending resume-data slot. returns a vector of
+        // (info_hash, bencoded_bytes) pairs. an empty result is normal —
+        // alerts may not have arrived yet for very-recently-submitted saves.
+        pub fn bridge_take_pending_resume_data() -> Vec<PendingResume>;
     }
 }

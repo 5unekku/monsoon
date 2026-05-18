@@ -96,6 +96,19 @@ impl Session {
         ffi::bridge_get_session_stats(&self.inner)
     }
 
+    /// trigger an async post_session_stats. the result arrives via
+    /// session_stats_alert and updates the bridge-side snapshot that
+    /// `stats()` reads from.
+    pub fn post_stats(&mut self) {
+        ffi::bridge_session_post_stats(self.inner.pin_mut());
+    }
+
+    /// drain the bridge's pending resume-data slot. each (info_hash, bytes)
+    /// pair was produced by a successful save_resume_data_alert.
+    pub fn take_pending_resume_data(&self) -> Vec<crate::bridge::ffi::PendingResume> {
+        ffi::bridge_take_pending_resume_data()
+    }
+
     /// load an ip filter from a path on disk. returns the number of rules
     /// loaded, or -1 if the file couldn't be opened. an empty file (0 rules)
     /// is treated as "do not install a filter."
@@ -122,8 +135,17 @@ impl TorrentHandle {
     pub fn force_recheck(&self) { ffi::bridge_torrent_force_recheck(&self.inner); }
     pub fn info_hash(&self) -> String { ffi::bridge_info_hash_to_string(&self.inner) }
 
+    /// legacy synchronous resume_data. kept as a fallback for one-shot
+    /// shutdown paths where async would mean draining alerts during
+    /// teardown. new code should call `submit_save_resume_data` instead.
     pub fn resume_data(&self) -> Vec<u8> {
         ffi::bridge_get_resume_data(&self.inner)
+    }
+
+    /// submit an async save_resume_data. the bencoded blob arrives later
+    /// via `Session::take_pending_resume_data()`.
+    pub fn submit_save_resume_data(&self) {
+        ffi::bridge_torrent_save_resume_data_async(&self.inner);
     }
 
     pub fn set_file_priority(&self, file_index: i32, priority: i32) {
