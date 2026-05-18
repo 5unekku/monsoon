@@ -63,6 +63,134 @@ enum Pane {
     Detail,
 }
 
+/// columns selectable in the torrent list. only columns whose data the
+/// daemon actually exposes today are listed here. the qBT picker has more
+/// (popularity, ratio limit, last seen complete, reannounce in, etc.) —
+/// add them as the bridge surfaces the underlying fields.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Column {
+    Index,
+    Name,
+    State,
+    Progress,
+    Down,
+    Up,
+    Peers,
+    Seeds,
+    Size,
+    Downloaded,
+    Uploaded,
+    AddedOn,
+    CompletedOn,
+    SavePath,
+    Category,
+    Tags,
+    InfoHash,
+}
+
+impl Column {
+    const ALL: [Column; 17] = [
+        Column::Index, Column::Name, Column::State, Column::Progress,
+        Column::Down, Column::Up, Column::Peers, Column::Seeds,
+        Column::Size, Column::Downloaded, Column::Uploaded,
+        Column::AddedOn, Column::CompletedOn, Column::SavePath,
+        Column::Category, Column::Tags, Column::InfoHash,
+    ];
+
+    fn key(&self) -> &'static str {
+        match self {
+            Column::Index => "index",
+            Column::Name => "name",
+            Column::State => "state",
+            Column::Progress => "progress",
+            Column::Down => "down",
+            Column::Up => "up",
+            Column::Peers => "peers",
+            Column::Seeds => "seeds",
+            Column::Size => "size",
+            Column::Downloaded => "downloaded",
+            Column::Uploaded => "uploaded",
+            Column::AddedOn => "added_on",
+            Column::CompletedOn => "completed_on",
+            Column::SavePath => "save_path",
+            Column::Category => "category",
+            Column::Tags => "tags",
+            Column::InfoHash => "info_hash",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Column::Index => "#",
+            Column::Name => "name",
+            Column::State => "st",
+            Column::Progress => "prog",
+            Column::Down => "down",
+            Column::Up => "up",
+            Column::Peers => "peers",
+            Column::Seeds => "seeds",
+            Column::Size => "size",
+            Column::Downloaded => "downloaded",
+            Column::Uploaded => "uploaded",
+            Column::AddedOn => "added on",
+            Column::CompletedOn => "completed",
+            Column::SavePath => "save path",
+            Column::Category => "cat",
+            Column::Tags => "tags",
+            Column::InfoHash => "info hash",
+        }
+    }
+
+    fn width(&self) -> Constraint {
+        match self {
+            Column::Index => Constraint::Length(4),
+            Column::Name => Constraint::Min(20),
+            Column::State => Constraint::Length(4),
+            Column::Progress => Constraint::Length(7),
+            Column::Down | Column::Up => Constraint::Length(12),
+            Column::Peers => Constraint::Length(8),
+            Column::Seeds => Constraint::Length(7),
+            Column::Size | Column::Downloaded | Column::Uploaded => Constraint::Length(10),
+            Column::AddedOn | Column::CompletedOn => Constraint::Length(19),
+            Column::SavePath => Constraint::Min(20),
+            Column::Category => Constraint::Length(12),
+            Column::Tags => Constraint::Min(10),
+            Column::InfoHash => Constraint::Length(40),
+        }
+    }
+
+    fn render(&self, index: usize, torrent: &TorrentInfo) -> String {
+        match self {
+            Column::Index => format!("{:>3}", index),
+            Column::Name => torrent.name.clone(),
+            Column::State => format_state(&torrent.state, torrent.is_paused),
+            Column::Progress => format!("{:>5.1}%", torrent.progress * 100.0),
+            Column::Down => crate::display::format_rate(torrent.download_rate),
+            Column::Up => crate::display::format_rate(torrent.upload_rate),
+            Column::Peers => format!("{}/{}", torrent.connected_peers, torrent.total_peers),
+            Column::Seeds => format!("{}/{}", torrent.connected_seeds, torrent.total_seeds),
+            Column::Size => crate::display::format_bytes(torrent.total_wanted),
+            Column::Downloaded => crate::display::format_bytes(torrent.total_download),
+            Column::Uploaded => crate::display::format_bytes(torrent.total_upload),
+            Column::AddedOn => crate::display::format_timestamp(torrent.added_time),
+            Column::CompletedOn => crate::display::format_timestamp(torrent.completed_time),
+            Column::SavePath => torrent.save_path.clone(),
+            Column::Category => torrent.category.clone().unwrap_or_default(),
+            Column::Tags => torrent.tags.iter().cloned().collect::<Vec<_>>().join(","),
+            Column::InfoHash => torrent.info_hash.clone(),
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Column> {
+        Column::ALL.iter().copied().find(|column| column.key() == key)
+    }
+}
+
+const DEFAULT_COLUMNS: &[Column] = &[
+    Column::Index, Column::Name, Column::State, Column::Progress,
+    Column::Down, Column::Up, Column::Peers,
+];
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatusFilter {
     All,
@@ -497,6 +625,12 @@ struct AppState {
     detail_tab_bar_rect: Rect,
     /// timestamp of the most recent left-click; used to detect double-clicks
     last_click: Option<(Instant, u16, u16)>,
+    /// columns shown in the torrent list, in display order
+    visible_columns: Vec<Column>,
+    /// when Some, the column picker overlay is open (selection index)
+    column_picker: Option<usize>,
+    /// folder paths that are currently collapsed in the content tab
+    collapsed_folders: std::collections::BTreeSet<String>,
 }
 
 impl AppState {
@@ -508,9 +642,22 @@ impl AppState {
 
         // load [tui] defaults from config.toml. failure here is non-fatal —
         // worst case the user sees built-in defaults until they fix the file.
-        let (show_sidebar, show_detail) = Config::load()
-            .map(|config| (config.tui_show_sidebar, config.tui_show_detail))
-            .unwrap_or((false, false));
+        let (show_sidebar, show_detail, configured_columns) = Config::load()
+            .map(|config| (config.tui_show_sidebar, config.tui_show_detail, config.tui_columns))
+            .unwrap_or((false, false, Vec::new()));
+        let visible_columns: Vec<Column> = if (configured_columns.is_empty()) {
+            DEFAULT_COLUMNS.to_vec()
+        } else {
+            configured_columns.iter()
+                .filter_map(|key| Column::from_key(key))
+                .collect()
+        };
+        // fall back to defaults if everything in the config was unrecognised
+        let visible_columns = if (visible_columns.is_empty()) {
+            DEFAULT_COLUMNS.to_vec()
+        } else {
+            visible_columns
+        };
 
         Self {
             mode: Mode::Main,
@@ -536,6 +683,9 @@ impl AppState {
             detail_rect: Rect::default(),
             detail_tab_bar_rect: Rect::default(),
             last_click: None,
+            visible_columns,
+            column_picker: None,
+            collapsed_folders: std::collections::BTreeSet::new(),
         }
     }
 
@@ -574,7 +724,9 @@ impl AppState {
             Pane::Sidebar => move_list(&mut self.sidebar_state, StatusFilter::ALL.len(), delta),
             Pane::Detail => match self.detail_tab {
                 DetailTab::Content => {
-                    let count = self.detail.as_ref().map(|detail| detail.files.len()).unwrap_or(0);
+                    let count = self.detail.as_ref()
+                        .map(|detail| build_tree_rows(detail, &self.collapsed_folders).len())
+                        .unwrap_or(0);
                     move_table(&mut self.detail_files_state, count, delta);
                 }
                 DetailTab::Peers => {
@@ -640,7 +792,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         if (event::poll(EVENT_TICK)?) {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    let exit = if (state.prompt.is_some()) {
+                    let exit = if (state.column_picker.is_some()) {
+                        handle_picker_key(key.code, key.modifiers, &mut state)
+                    } else if (state.prompt.is_some()) {
                         handle_prompt_key(key.code, key.modifiers, &mut state)
                     } else if (matches!(state.mode, Mode::Settings(_))) {
                         handle_settings_key(key.code, key.modifiers, &mut state)
@@ -668,6 +822,9 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => state.move_focused(-1),
         (KeyCode::PageDown, _) => state.move_focused(10),
         (KeyCode::PageUp, _) => state.move_focused(-10),
+        // a/d (or arrows) collapse/expand the focused folder in the content tab
+        (KeyCode::Char('a'), KeyModifiers::NONE) | (KeyCode::Left, _) => collapse_focused(state, true),
+        (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Right, _) => collapse_focused(state, false),
 
         // pane cycling + visibility toggles
         (KeyCode::Tab, _) => state.cycle_focus(),
@@ -713,6 +870,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Char('g'), KeyModifiers::NONE) => show_magnet(state),
         // shift+s for sequential toggle (lowercase s is wasd-down)
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
+        (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
 
         _ => {}
     }
@@ -883,6 +1041,75 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
         _ => {}
     }
     false
+}
+
+/// when the focused row in the content tab is a folder, toggle its collapsed
+/// state. `collapse` true means a-or-left (collapse), false means d-or-right
+/// (expand). on file rows the key is a no-op.
+fn collapse_focused(state: &mut AppState, collapse: bool) {
+    if (state.focus != Pane::Detail || state.detail_tab != DetailTab::Content) {
+        return;
+    }
+    let Some(detail) = &state.detail else { return; };
+    let rows = build_tree_rows(detail, &state.collapsed_folders);
+    let Some(row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else { return; };
+    if (!row.is_folder) { return; }
+    if (collapse) {
+        state.collapsed_folders.insert(row.full_path.clone());
+    } else {
+        state.collapsed_folders.remove(&row.full_path);
+    }
+}
+
+fn handle_picker_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    let Some(selected) = state.column_picker else { return false; };
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+            state.column_picker = None;
+            persist_visible_columns(&state.visible_columns);
+        }
+        (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            state.column_picker = Some((selected + 1).min(Column::ALL.len() - 1));
+        }
+        (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            state.column_picker = Some(selected.saturating_sub(1));
+        }
+        (KeyCode::Char(' '), _) | (KeyCode::Enter, _) => {
+            let column = Column::ALL[selected];
+            if let Some(position) = state.visible_columns.iter().position(|c| *c == column) {
+                // never let the user hide every column — the list would be empty
+                if (state.visible_columns.len() > 1) {
+                    state.visible_columns.remove(position);
+                }
+            } else {
+                state.visible_columns.push(column);
+            }
+        }
+        // shift+up/down reorders the selected column up or down within the visible set
+        (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::Char('W'), KeyModifiers::SHIFT) => {
+            move_visible_column(state, Column::ALL[selected], -1);
+        }
+        (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::Char('S'), KeyModifiers::SHIFT) => {
+            move_visible_column(state, Column::ALL[selected], 1);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn move_visible_column(state: &mut AppState, column: Column, delta: isize) {
+    if let Some(position) = state.visible_columns.iter().position(|c| *c == column) {
+        let target = (position as isize + delta).clamp(0, state.visible_columns.len() as isize - 1) as usize;
+        if (target != position) { state.visible_columns.swap(position, target); }
+    }
+}
+
+fn persist_visible_columns(visible: &[Column]) {
+    // best-effort save — ignore errors so a r/o config dir doesn't crash the tui
+    let Ok(mut config) = Config::load() else { return; };
+    config.tui_columns = visible.iter().map(|column| column.key().to_string()).collect();
+    let _ = config.save();
 }
 
 /// route a mouse event. only fires in main mode — overlays (prompt, settings)
@@ -1068,6 +1295,78 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.prompt.is_some()) {
         draw_prompt(frame, state);
     }
+    if (state.column_picker.is_some()) {
+        draw_column_picker(frame, state);
+    }
+}
+
+fn draw_column_picker(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(selected) = state.column_picker else { return; };
+    let area = frame.area();
+    let width = 48u16.min(area.width.saturating_sub(4));
+    let height: u16 = (Column::ALL.len() as u16 + 5).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" columns ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " space toggle  shift+w/s reorder  esc save+close",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[0],
+    );
+
+    let lines: Vec<Line> = Column::ALL.iter().enumerate().map(|(index, column)| {
+        let visible_position = state.visible_columns.iter().position(|c| *c == *column);
+        let marker = match visible_position {
+            Some(position) => format!(" [{}] ", position + 1),
+            None => " [ ] ".to_string(),
+        };
+        let marker_style = if (visible_position.is_some()) {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let label_style = if (index == selected) {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(vec![
+            Span::styled(marker, marker_style),
+            Span::styled(format!("{:18}", column.label()), label_style),
+            Span::styled(format!("  {}", column.key()), Style::default().fg(Color::DarkGray)),
+        ])
+    }).collect();
+    frame.render_widget(Paragraph::new(lines), layout[1]);
+
+    let count = state.visible_columns.len();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!(" {} visible", count), Style::default().fg(Color::Cyan)),
+            Span::raw("    "),
+            Span::styled("(saved to config.toml on close)", Style::default().fg(Color::DarkGray)),
+        ])),
+        layout[2],
+    );
 }
 
 fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
@@ -1229,20 +1528,14 @@ fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
 }
 
 fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
-    let header_cells = [" #", "name", "st", "prog", "down", "up", "peers"]
-        .into_iter()
-        .map(|label| Cell::from(label).style(Style::default().add_modifier(Modifier::BOLD)));
+    let header_cells: Vec<Cell> = state.visible_columns.iter()
+        .map(|column| Cell::from(column.label()).style(Style::default().add_modifier(Modifier::BOLD)))
+        .collect();
     let header = Row::new(header_cells).height(1);
 
     let visible = state.filtered_indices();
     let rows: Vec<Row> = visible.iter().map(|index| {
         let torrent = &state.torrents[*index];
-        let state_label = format_state(&torrent.state, torrent.is_paused);
-        let progress = format!("{:>5.1}%", torrent.progress * 100.0);
-        let down = crate::display::format_rate(torrent.download_rate);
-        let up = crate::display::format_rate(torrent.upload_rate);
-        let peers = format!("{}/{}", torrent.connected_peers, torrent.total_peers);
-
         let row_style = if (torrent.is_paused) {
             Style::default().fg(Color::DarkGray)
         } else if (torrent.is_seeding) {
@@ -1250,28 +1543,13 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
         } else {
             Style::default()
         };
-
-        Row::new(vec![
-            Cell::from(format!("{:>3}", index)),
-            Cell::from(torrent.name.clone()),
-            Cell::from(state_label),
-            Cell::from(progress),
-            Cell::from(down),
-            Cell::from(up),
-            Cell::from(peers),
-        ])
-        .style(row_style)
+        let cells: Vec<Cell> = state.visible_columns.iter()
+            .map(|column| Cell::from(column.render(*index, torrent)))
+            .collect();
+        Row::new(cells).style(row_style)
     }).collect();
 
-    let widths = [
-        Constraint::Length(4),
-        Constraint::Min(20),
-        Constraint::Length(4),
-        Constraint::Length(7),
-        Constraint::Length(12),
-        Constraint::Length(12),
-        Constraint::Length(14),
-    ];
+    let widths: Vec<Constraint> = state.visible_columns.iter().map(|column| column.width()).collect();
 
     let title = if (state.daemon_unreachable) {
         format!(" torrents — {} (daemon unreachable) ", state.status_filter.label())
@@ -1326,6 +1604,126 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
     }
 }
 
+/// one row in the rendered file tree: either a folder header (with collapse
+/// state) or a leaf file row. file_index is None for folders.
+struct TreeRow {
+    indent: usize,
+    label: String,
+    full_path: String,
+    is_folder: bool,
+    #[allow(dead_code)] // wired up for per-file priority editing in a future iteration
+    file_index: Option<usize>,
+    total_size: i64,
+    total_done: i64,
+    priority: Option<u8>,
+}
+
+/// build a tree of files from their flat paths. folders aggregate size +
+/// progress from their children so the listing reads at a glance.
+fn build_tree_rows(detail: &TorrentDetail, collapsed: &std::collections::BTreeSet<String>) -> Vec<TreeRow> {
+    // 1. group files by directory
+    let mut by_folder: std::collections::BTreeMap<String, Vec<usize>> = std::collections::BTreeMap::new();
+    let mut all_folders: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (file_index, file) in detail.files.iter().enumerate() {
+        let folder = std::path::Path::new(&file.path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_default();
+        by_folder.entry(folder.clone()).or_default().push(file_index);
+        // record every ancestor folder so we can render the tree
+        let mut accumulated = String::new();
+        for component in folder.split('/').filter(|component| !component.is_empty()) {
+            if (!accumulated.is_empty()) { accumulated.push('/'); }
+            accumulated.push_str(component);
+            all_folders.insert(accumulated.clone());
+        }
+    }
+
+    // 2. walk folders in lexical order, emitting folder + child file rows.
+    // for v1 we render folders + their direct files; deeper nesting is folded
+    // into the indent. paths like "a/b/c.bin" produce folder "a", folder "a/b",
+    // then leaf "c.bin". this matches qBT's tree behaviour.
+    let mut rows: Vec<TreeRow> = Vec::new();
+
+    // emit folder rows in depth order (sorted strings give us that)
+    let mut visited_folders: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut skip_prefix: Option<String> = None;
+    for folder in all_folders.iter() {
+        // skip files inside a collapsed ancestor
+        if let Some(prefix) = &skip_prefix {
+            if (folder.starts_with(prefix.as_str())) { continue; }
+            skip_prefix = None;
+        }
+        if (!visited_folders.insert(folder.clone())) { continue; }
+        let indent = folder.matches('/').count();
+        let name = folder.rsplit('/').next().unwrap_or(folder).to_string();
+        // folder size/progress = sum across descendants
+        let (total_size, total_done) = detail.files.iter()
+            .filter(|file| file.path == *folder
+                || file.path.starts_with(&format!("{}/", folder)))
+            .fold((0i64, 0i64), |(size_sum, done_sum), file| {
+                let done = (file.size as f64 * file.progress as f64) as i64;
+                (size_sum + file.size, done_sum + done)
+            });
+        let is_collapsed = collapsed.contains(folder);
+        let prefix = if (is_collapsed) { "▸ " } else { "▾ " };
+        rows.push(TreeRow {
+            indent,
+            label: format!("{}{}", prefix, name),
+            full_path: folder.clone(),
+            is_folder: true,
+            file_index: None,
+            total_size,
+            total_done,
+            priority: None,
+        });
+        if (is_collapsed) {
+            skip_prefix = Some(format!("{}/", folder));
+        }
+    }
+
+    // 3. emit file leaves; skip any file inside a collapsed folder
+    for (file_index, file) in detail.files.iter().enumerate() {
+        let folder = std::path::Path::new(&file.path)
+            .parent()
+            .map(|parent| parent.to_string_lossy().to_string())
+            .unwrap_or_default();
+        // check if any ancestor is collapsed
+        let mut hidden = false;
+        let mut accumulated = String::new();
+        for component in folder.split('/').filter(|component| !component.is_empty()) {
+            if (!accumulated.is_empty()) { accumulated.push('/'); }
+            accumulated.push_str(component);
+            if (collapsed.contains(&accumulated)) { hidden = true; break; }
+        }
+        if (hidden) { continue; }
+        let indent = if (folder.is_empty()) { 0 } else { folder.matches('/').count() + 1 };
+        let name = std::path::Path::new(&file.path)
+            .file_name()
+            .map(|os| os.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.path.clone());
+        let total_done = (file.size as f64 * file.progress as f64) as i64;
+        rows.push(TreeRow {
+            indent,
+            label: name,
+            full_path: file.path.clone(),
+            is_folder: false,
+            file_index: Some(file_index),
+            total_size: file.size,
+            total_done,
+            priority: Some(file.priority),
+        });
+    }
+
+    // sort by path so folders and their files appear together. fall back to
+    // file_index for stable order within the same path.
+    rows.sort_by(|left, right| {
+        left.full_path.cmp(&right.full_path).then_with(|| left.is_folder.cmp(&right.is_folder).reverse())
+    });
+
+    rows
+}
+
 fn draw_content_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
     let Some(detail) = &state.detail else {
         frame.render_widget(Paragraph::new("no torrent selected").style(Style::default().fg(Color::DarkGray)), area);
@@ -1339,56 +1737,56 @@ fn draw_content_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState
         return;
     }
 
+    let tree_rows = build_tree_rows(detail, &state.collapsed_folders);
+
     let header = Row::new([
-        Cell::from("#").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("name").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("total size").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("size").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("progress").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("priority").style(Style::default().add_modifier(Modifier::BOLD)),
         Cell::from("remaining").style(Style::default().add_modifier(Modifier::BOLD)),
-        Cell::from("avail").style(Style::default().add_modifier(Modifier::BOLD)),
     ]);
 
-    // per-file progress, priority come from the bridge; remaining is derived;
-    // availability stays placeholder until libtorrent's per-file availability
-    // is plumbed through (would need a new bridge call for piece availability).
-    let rows: Vec<Row> = detail.files.iter().map(|file: &FileInfo| {
-        let remaining = file.size - ((file.size as f64 * file.progress as f64) as i64);
-        let priority_label = match file.priority {
-            0 => "skip".to_string(),
-            1..=3 => format!("low/{}", file.priority),
-            4 => "normal".to_string(),
-            5..=6 => format!("high/{}", file.priority),
-            7 => "max".to_string(),
-            other => other.to_string(),
+    let rows: Vec<Row> = tree_rows.iter().map(|tree_row| {
+        let indent = "  ".repeat(tree_row.indent);
+        let remaining = (tree_row.total_size - tree_row.total_done).max(0);
+        let progress = if (tree_row.total_size > 0) {
+            tree_row.total_done as f64 / tree_row.total_size as f64 * 100.0
+        } else { 0.0 };
+        let priority_label = match tree_row.priority {
+            None => "—".to_string(),
+            Some(0) => "skip".to_string(),
+            Some(1..=3) => format!("low/{}", tree_row.priority.unwrap()),
+            Some(4) => "normal".to_string(),
+            Some(5..=6) => format!("high/{}", tree_row.priority.unwrap()),
+            Some(7) => "max".to_string(),
+            Some(other) => other.to_string(),
         };
-        let row_style = if (file.priority == 0) {
+        let row_style = if (tree_row.is_folder) {
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+        } else if (tree_row.priority == Some(0)) {
             Style::default().fg(Color::DarkGray)
-        } else if (file.progress >= 1.0) {
+        } else if (progress >= 100.0) {
             Style::default().fg(Color::Green)
         } else {
             Style::default()
         };
         Row::new(vec![
-            Cell::from(file.index.to_string()),
-            Cell::from(file.path.clone()),
-            Cell::from(crate::display::format_bytes(file.size)),
-            Cell::from(format!("{:>5.1}%", file.progress * 100.0)),
+            Cell::from(format!("{}{}", indent, tree_row.label)),
+            Cell::from(crate::display::format_bytes(tree_row.total_size)),
+            Cell::from(format!("{:>5.1}%", progress)),
             Cell::from(priority_label),
-            Cell::from(crate::display::format_bytes(remaining.max(0))),
-            Cell::from("—"),
+            Cell::from(crate::display::format_bytes(remaining)),
         ])
         .style(row_style)
     }).collect();
 
     let widths = [
-        Constraint::Length(4),
         Constraint::Min(20),
-        Constraint::Length(12),
+        Constraint::Length(10),
         Constraint::Length(8),
         Constraint::Length(9),
         Constraint::Length(12),
-        Constraint::Length(7),
     ];
 
     let table = Table::new(rows, widths)

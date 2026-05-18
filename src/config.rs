@@ -108,6 +108,10 @@ pub struct Config {
     pub tui_sidebar_width: u16,
     #[serde(default = "default_tui_detail_split_percent")]
     pub tui_detail_split_percent: u16,
+    /// ordered list of column keys visible in the torrent list. empty means
+    /// "use built-in defaults". valid keys live in tui::columns.
+    #[serde(default)]
+    pub tui_columns: Vec<String>,
 }
 
 fn default_completion_script_timeout() -> u64 { 60 }
@@ -166,6 +170,7 @@ impl Default for Config {
             tui_show_detail: false,
             tui_sidebar_width: default_tui_sidebar_width(),
             tui_detail_split_percent: default_tui_detail_split_percent(),
+            tui_columns: Vec::new(),
         }
     }
 }
