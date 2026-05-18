@@ -2012,9 +2012,11 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
                 cell.set_char('─').set_style(border_style);
             }
         }
+        // ┴ (not ┼) at each boundary: the vertical divider terminates here;
+        // data rows below the divider have no column separators.
         for boundary_x in &boundaries {
             if let Some(cell) = buffer.cell_mut((*boundary_x, divider_y)) {
-                cell.set_char('┼').set_style(border_style);
+                cell.set_char('┴').set_style(border_style);
             }
         }
         if let Some(cell) = buffer.cell_mut((area.x, divider_y)) {
