@@ -1,6 +1,10 @@
 #include "bridge.h"
 #include "rustor/src/bridge.rs.h"
 
+inline rust::String safe_rust_string(const std::string& s) {
+    return rustbridge::string_from_lossy(rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t*>(s.data()), s.size()));
+}
+
 #include <fstream>
 #include <mutex>
 #include <sstream>
@@ -114,10 +118,20 @@ static void apply_settings_pack(lt::settings_pack &pack, const SessionSettings &
     pack.set_bool(lt::settings_pack::proxy_tracker_connections, s.proxy_tracker_connections);
 }
 
-// return best available info hash as a hex string (v1 preferred, v2 fallback)
+// return best available info hash as a hex string (v1 preferred, v2 fallback).
+// note: sha1_hash::to_string() returns the raw 20-byte digest as a std::string,
+// NOT hex — feeding that into rust::String trips its utf-8 validator and aborts
+// the daemon. format via ostream (operator<< prints 40 hex digits) instead.
+template <typename Hash>
+static std::string hash_to_hex(const Hash &h) {
+    std::ostringstream oss;
+    oss << h;
+    return oss.str();
+}
+
 static std::string info_hash_str(const lt::info_hash_t &ih) {
-    if (ih.has_v1()) return ih.v1.to_string();
-    if (ih.has_v2()) return ih.v2.to_string();
+    if (ih.has_v1()) return hash_to_hex(ih.v1);
+    if (ih.has_v2()) return hash_to_hex(ih.v2);
     return "";
 }
 
@@ -269,10 +283,10 @@ rustbridge::TorrentStatus bridge_get_torrent_status(const lt::torrent_handle &hd
     }
 
     lt::torrent_status st = hdl.status();
-    ts.name = rust::String(st.name.c_str());
+    ts.name = safe_rust_string(st.name);
     ts.info_hash = rust::String(info_hash_str(hdl.info_hashes()).c_str());
     ts.state = rust::String(state_to_string(st.state).c_str());
-    ts.save_path = rust::String(st.save_path.c_str());
+    ts.save_path = safe_rust_string(st.save_path);
     ts.progress = st.progress;
     ts.total_download = st.total_download;
     ts.total_upload = st.total_upload;
@@ -286,7 +300,7 @@ rustbridge::TorrentStatus bridge_get_torrent_status(const lt::torrent_handle &hd
     ts.total_seeds = st.list_seeds;
     ts.num_pieces = st.num_pieces;
     ts.num_completed_pieces = (int32_t)st.pieces.count();
-    ts.error = rust::String(st.errc.message().c_str());
+    ts.error = safe_rust_string(st.errc.message());
     ts.is_paused = bool(st.flags & lt::torrent_flags::paused);
     ts.is_finished = st.is_finished;
     ts.is_seeding = st.state == lt::torrent_status::seeding;
@@ -308,7 +322,7 @@ rust::Vec<rustbridge::TorrentFile> bridge_get_torrent_files(const lt::torrent_ha
     auto &fs = ti->files();
     for (int i = 0; i < ti->num_files(); ++i) {
         rustbridge::TorrentFile tf;
-        tf.path = rust::String(fs.file_path(i).c_str());
+        tf.path = safe_rust_string(fs.file_path(i));
         tf.size = fs.file_size(i);
         tf.offset = fs.file_offset(i);
         files.push_back(std::move(tf));
@@ -329,7 +343,7 @@ rust::Vec<rustbridge::PeerInfo> bridge_get_torrent_peers(const lt::torrent_handl
         pi.port = p.ip.port();
         pi.download_rate = p.down_speed;
         pi.upload_rate = p.up_speed;
-        pi.client = rust::String(p.client.c_str());
+        pi.client = safe_rust_string(p.client);
         pi.progress = p.progress;
         std::string flags;
         if (p.flags & lt::peer_info::seed)                flags += "S";
@@ -410,8 +424,8 @@ rust::Vec<rustbridge::AlertInfo> bridge_pop_alerts(lt::session &ses) {
         // ── regular alerts pass through to the Rust alert log ──
         rustbridge::AlertInfo ai;
         ai.timestamp = a->timestamp().time_since_epoch().count();
-        ai.message = rust::String(a->message().c_str());
-        ai.alert_type = rust::String(a->what());
+        ai.message = safe_rust_string(a->message());
+        ai.alert_type = safe_rust_string(a->what());
         int cat = a->category();
         if      (cat & lt::alert::error_notification)        ai.category = rust::String("error");
         else if (cat & lt::alert::status_notification)       ai.category = rust::String("status");
@@ -521,7 +535,7 @@ rust::Vec<rustbridge::TorrentTracker> bridge_get_torrent_trackers(const lt::torr
     if (!hdl.is_valid()) return trackers;
     for (auto const &announce : hdl.trackers()) {
         rustbridge::TorrentTracker tracker;
-        tracker.url = rust::String(announce.url.c_str());
+        tracker.url = safe_rust_string(announce.url);
         tracker.tier = static_cast<int32_t>(announce.tier);
         tracker.verified = announce.verified;
         // updating / fails / message are per-endpoint — surface the worst across endpoints
@@ -538,7 +552,7 @@ rust::Vec<rustbridge::TorrentTracker> bridge_get_torrent_trackers(const lt::torr
         }
         tracker.updating = any_updating;
         tracker.fails = worst_fails;
-        tracker.message = rust::String(worst_message.c_str());
+        tracker.message = safe_rust_string(worst_message);
         trackers.push_back(std::move(tracker));
     }
     return trackers;

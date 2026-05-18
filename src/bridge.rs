@@ -260,4 +260,13 @@ pub mod ffi {
         // alerts may not have arrived yet for very-recently-submitted saves.
         pub fn bridge_take_pending_resume_data() -> Vec<PendingResume>;
     }
+
+    extern "Rust" {
+        fn string_from_lossy(bytes: &[u8]) -> String;
+    }
 }
+
+fn string_from_lossy(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
