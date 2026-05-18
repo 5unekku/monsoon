@@ -982,6 +982,89 @@ fn handle_connection(app: &mut App, stream: UnixStream) -> Result<bool> {
     Ok(shutdown)
 }
 
+/// fork and exec the daemon as a detached background process. parent returns
+/// immediately. child writes its pid to Config::pid_path() and redirects
+/// stdout/stderr to Config::log_path().
+///
+/// fork-vs-double-fork: we trust the child to detach itself (setsid + close
+/// stdin) via the `process::Command` plumbing below. this works because the
+/// child reopens its own session and is reparented to init if its parent dies.
+pub fn run_detached(_quiet: bool) -> Result<()> {
+    let binary = std::env::current_exe().context("locate current binary")?;
+    let log_path = Config::log_path()?;
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent).context("create log dir")?;
+    }
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .context("open daemon log")?;
+    let log_file_err = log_file.try_clone().context("clone log fd")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let mut command = std::process::Command::new(&binary);
+        command
+            .arg("daemon")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file_err))
+            .process_group(0);
+        command.spawn().context("spawn detached daemon")?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = log_file;
+        let _ = log_file_err;
+        std::process::Command::new(&binary).arg("daemon").spawn().context("spawn detached daemon")?;
+    }
+    println!("daemon spawned in background; log: {}", log_path.display());
+    println!("status: rustor status   stop: rustor stop (or kill)");
+    Ok(())
+}
+
+/// write our own pid to the pidfile and return the path for later removal.
+/// honours a stale pidfile (process not alive) by overwriting it.
+fn write_pidfile() -> Result<std::path::PathBuf> {
+    let path = Config::pid_path()?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if (path.exists()) {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            if let Ok(existing_pid) = text.trim().parse::<i32>() {
+                // probe with signal 0 — non-zero means the process is gone
+                let alive = unsafe { kill_probe(existing_pid) == 0 };
+                if (alive) {
+                    anyhow::bail!(
+                        "another daemon (pid {}) is already running. \
+                         use `rustor stop` first, or remove {} if it's stale",
+                        existing_pid, path.display()
+                    );
+                }
+                tracing::warn!("removing stale pidfile (pid {} not alive)", existing_pid);
+            }
+        }
+    }
+    std::fs::write(&path, std::process::id().to_string()).context("write pidfile")?;
+    Ok(path)
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(unix)]
+unsafe fn kill_probe(pid: i32) -> i32 {
+    unsafe { kill(pid, 0) }
+}
+
+#[cfg(not(unix))]
+unsafe fn kill_probe(_pid: i32) -> i32 { -1 }
+
 /// run the daemon in the foreground — blocks until SIGTERM/SIGINT or a Shutdown request
 pub fn run(quiet: bool) -> Result<()> {
     if (!quiet) {
@@ -1027,12 +1110,19 @@ pub fn run(quiet: bool) -> Result<()> {
     let listener = UnixListener::bind(&socket_path).context("bind socket")?;
     listener.set_nonblocking(true).context("set nonblocking")?;
 
+    let pidfile_path = write_pidfile().context("write pidfile")?;
+
     let shutdown = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))?;
 
+    // sd_notify if launched under systemd with Type=notify. silent when
+    // NOTIFY_SOCKET isn't set, so this is safe everywhere.
+    notify_systemd_ready();
+
     tracing::info!(
         socket = %socket_path.display(),
+        pidfile = %pidfile_path.display(),
         libtorrent = %crate::session::libtorrent_version(),
         "daemon started"
     );
@@ -1082,5 +1172,27 @@ pub fn run(quiet: bool) -> Result<()> {
     tracing::info!("shutting down, saving resume data");
     app.save_resume_data();
     let _ = std::fs::remove_file(&socket_path);
+    let _ = std::fs::remove_file(&pidfile_path);
     Ok(())
+}
+
+/// notify systemd that the daemon is ready, when launched under Type=notify.
+/// pure no-op on systems without NOTIFY_SOCKET set.
+fn notify_systemd_ready() {
+    let socket_path = match std::env::var("NOTIFY_SOCKET") {
+        Ok(value) if !value.is_empty() => value,
+        _ => return,
+    };
+    use std::os::unix::net::UnixDatagram;
+    let datagram = match UnixDatagram::unbound() {
+        Ok(datagram) => datagram,
+        Err(_) => return,
+    };
+    let target = if let Some(stripped) = socket_path.strip_prefix('@') {
+        // abstract namespace — currently rare for sd_notify but supported by systemd
+        format!("\0{}", stripped)
+    } else {
+        socket_path
+    };
+    let _ = datagram.send_to(b"READY=1\n", &target);
 }

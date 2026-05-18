@@ -38,7 +38,19 @@ enum Commands {
         /// suppress all log output (used when auto-spawned by cli commands)
         #[arg(long)]
         quiet: bool,
+        /// fork into the background, write a pidfile to $XDG_RUNTIME_DIR/rustor,
+        /// and redirect stdout/stderr to $XDG_STATE_HOME/rustor/daemon.log.
+        /// `rustor stop` / `rustor kill` still control it from the same binary.
+        #[arg(long)]
+        detach: bool,
     },
+
+    /// show whether the daemon is running, its pid, socket path, and version
+    Status,
+
+    /// send SIGTERM to the running daemon (cleaner than `rustor stop` if the
+    /// ipc socket is wedged)
+    Kill,
 
     /// list all torrents
     #[command(alias = "ls")]
@@ -236,7 +248,15 @@ fn main() -> Result<()> {
 
     match cli.command {
         None | Some(Commands::Tui) => tui::run(),
-        Some(Commands::Daemon { quiet }) => server::run(quiet),
+        Some(Commands::Daemon { quiet, detach }) => {
+            if (detach) {
+                server::run_detached(quiet)
+            } else {
+                server::run(quiet)
+            }
+        }
+        Some(Commands::Status) => print_daemon_status(),
+        Some(Commands::Kill) => send_sigterm_to_daemon(),
         Some(Commands::Service { action }) => run_service_command(action),
         Some(command) => {
             let request = command_to_request(command);
@@ -246,6 +266,58 @@ fn main() -> Result<()> {
         }
     }
 }
+
+fn print_daemon_status() -> Result<()> {
+    let pid_path = config::Config::pid_path()?;
+    let socket_path = config::Config::socket_path()?;
+    if (!pid_path.exists()) {
+        println!("daemon: not running");
+        println!("socket: {}", socket_path.display());
+        return Ok(());
+    }
+    let pid_text = std::fs::read_to_string(&pid_path)?;
+    let pid: i32 = pid_text.trim().parse().unwrap_or(0);
+    // kill(pid, 0) probes whether the process exists without affecting it
+    let alive = libc_kill(pid, 0) == 0;
+    if (!alive) {
+        println!("daemon: stale pidfile (pid {} not running)", pid);
+        let _ = std::fs::remove_file(&pid_path);
+    } else {
+        println!("daemon: running (pid {})", pid);
+        println!("socket: {}", socket_path.display());
+        println!("pidfile: {}", pid_path.display());
+    }
+    Ok(())
+}
+
+fn send_sigterm_to_daemon() -> Result<()> {
+    let pid_path = config::Config::pid_path()?;
+    if (!pid_path.exists()) {
+        anyhow::bail!("daemon: not running (no pidfile)");
+    }
+    let pid: i32 = std::fs::read_to_string(&pid_path)?.trim().parse()
+        .map_err(|error| anyhow::anyhow!("bad pidfile: {}", error))?;
+    if (libc_kill(pid, 15) != 0) {
+        anyhow::bail!("kill {}: {}", pid, std::io::Error::last_os_error());
+    }
+    println!("SIGTERM sent to {}", pid);
+    Ok(())
+}
+
+/// `signal` 0 is a no-op probe (does the pid exist?); 15 is SIGTERM.
+/// kept off the `libc` crate — one extern fn doesn't justify a dep.
+#[cfg(unix)]
+unsafe extern "C" {
+    fn kill(pid: i32, signal: i32) -> i32;
+}
+
+#[cfg(unix)]
+fn libc_kill(pid: i32, signal: i32) -> i32 {
+    unsafe { kill(pid, signal) }
+}
+
+#[cfg(not(unix))]
+fn libc_kill(_pid: i32, _signal: i32) -> i32 { -1 }
 
 fn command_to_request(command: Commands) -> Request {
     match command {
@@ -289,7 +361,11 @@ fn command_to_request(command: Commands) -> Request {
             CategoryAction::Assign { index, name } => Request::SetCategory { index, name },
         },
         Commands::Stop => Request::Shutdown,
-        Commands::Daemon { .. } | Commands::Service { .. } | Commands::Tui => unreachable!(),
+        Commands::Daemon { .. }
+        | Commands::Service { .. }
+        | Commands::Tui
+        | Commands::Status
+        | Commands::Kill => unreachable!("handled in main"),
     }
 }
 
@@ -328,7 +404,8 @@ fn install_service() -> Result<()> {
          After=network.target\n\
          \n\
          [Service]\n\
-         Type=simple\n\
+         Type=notify\n\
+         NotifyAccess=main\n\
          ExecStart={binary} daemon\n\
          Restart=on-failure\n\
          RestartSec=5\n\

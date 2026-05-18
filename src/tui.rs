@@ -1,5 +1,8 @@
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEvent, MouseEventKind,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -37,14 +40,17 @@ pub fn run() -> Result<()> {
 fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode().context("enable raw mode")?;
     let mut out = stdout();
-    execute!(out, EnterAlternateScreen).context("enter alt screen")?;
+    // EnableMouseCapture switches the terminal into SGR mouse mode (xterm
+    // extension; supported by every modern terminal). releases on restore.
+    execute!(out, EnterAlternateScreen, EnableMouseCapture)
+        .context("enter alt screen + mouse")?;
     let backend = CrosstermBackend::new(out);
     Terminal::new(backend).context("create terminal")
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
     disable_raw_mode().ok();
-    execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+    execute!(terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen).ok();
     terminal.show_cursor().ok();
     Ok(())
 }
@@ -483,6 +489,14 @@ struct AppState {
     focus: Pane,
     status_filter: StatusFilter,
     detail_tab: DetailTab,
+    // pane rectangles from the last draw — used by mouse handler to route
+    // clicks. zero-sized when the pane is hidden.
+    sidebar_rect: Rect,
+    list_rect: Rect,
+    detail_rect: Rect,
+    detail_tab_bar_rect: Rect,
+    /// timestamp of the most recent left-click; used to detect double-clicks
+    last_click: Option<(Instant, u16, u16)>,
 }
 
 impl AppState {
@@ -517,6 +531,11 @@ impl AppState {
             focus: Pane::List,
             status_filter: StatusFilter::All,
             detail_tab: DetailTab::Content,
+            sidebar_rect: Rect::default(),
+            list_rect: Rect::default(),
+            detail_rect: Rect::default(),
+            detail_tab_bar_rect: Rect::default(),
+            last_click: None,
         }
     }
 
@@ -630,6 +649,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     };
                     if (exit) { return Ok(()); }
                 }
+                Event::Mouse(mouse) => handle_mouse(mouse, &mut state),
                 _ => {}
             }
         }
@@ -865,6 +885,120 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
     false
 }
 
+/// route a mouse event. only fires in main mode — overlays (prompt, settings)
+/// are keyboard-only for now to keep input flow predictable.
+fn handle_mouse(event: MouseEvent, state: &mut AppState) {
+    if (state.prompt.is_some() || matches!(state.mode, Mode::Settings(_))) {
+        return;
+    }
+    let column = event.column;
+    let row = event.row;
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => mouse_left_down(column, row, state),
+        MouseEventKind::ScrollUp => mouse_scroll(column, row, state, -3),
+        MouseEventKind::ScrollDown => mouse_scroll(column, row, state, 3),
+        _ => {}
+    }
+}
+
+fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
+    if (rect.width == 0 || rect.height == 0) { return false; }
+    column >= rect.x
+        && column < rect.x + rect.width
+        && row >= rect.y
+        && row < rect.y + rect.height
+}
+
+fn mouse_left_down(column: u16, row: u16, state: &mut AppState) {
+    // tab bar click — switch detail tab. tab bar lives at the top of the
+    // detail pane; each label takes label.width + separator.
+    if (rect_contains(state.detail_tab_bar_rect, column, row)) {
+        // tabs are separated by " │ " and the first tab is left-aligned at x.
+        // for a robust hit-test we measure label widths in order.
+        let mut x_cursor = state.detail_tab_bar_rect.x;
+        for tab in DetailTab::ALL.iter() {
+            let width = tab.label().len() as u16;
+            let end = x_cursor + width;
+            if (column >= x_cursor && column < end) {
+                state.detail_tab = *tab;
+                state.focus = Pane::Detail;
+                return;
+            }
+            x_cursor = end + 3; // " │ " separator
+        }
+        state.focus = Pane::Detail;
+        return;
+    }
+    // sidebar row click — select the status filter
+    if (rect_contains(state.sidebar_rect, column, row)) {
+        // sidebar has a 1-row border on top, then one row per filter
+        let row_in_pane = row.saturating_sub(state.sidebar_rect.y + 1);
+        let target = row_in_pane as usize;
+        if (target < StatusFilter::ALL.len()) {
+            state.sidebar_state.select(Some(target));
+            state.apply_sidebar_selection();
+        }
+        state.focus = Pane::Sidebar;
+        return;
+    }
+    // torrent list row click — select that torrent. detect double-click for
+    // open-detail (qBT-style).
+    if (rect_contains(state.list_rect, column, row)) {
+        // list has a 1-row border, then a 1-row header, then data rows
+        let header_offset = 2;
+        let row_in_data = row.saturating_sub(state.list_rect.y + header_offset);
+        let visible = state.filtered_indices();
+        let target = row_in_data as usize;
+        if (target < visible.len()) {
+            state.table_state.select(Some(target));
+        }
+        state.focus = Pane::List;
+        let now = Instant::now();
+        let is_double = state.last_click
+            .map(|(when, prev_col, prev_row)| {
+                prev_col == column && prev_row == row && now.duration_since(when) < Duration::from_millis(400)
+            })
+            .unwrap_or(false);
+        state.last_click = Some((now, column, row));
+        if (is_double) {
+            // open the detail pane if it wasn't already open
+            if (!state.show_detail) {
+                state.show_detail = true;
+                state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+            }
+        }
+        return;
+    }
+    // click inside the detail pane (not on the tab bar) — focus it
+    if (rect_contains(state.detail_rect, column, row)) {
+        state.focus = Pane::Detail;
+    }
+}
+
+fn mouse_scroll(column: u16, row: u16, state: &mut AppState, delta: isize) {
+    // route the scroll to whichever pane the cursor is over so independent
+    // list/detail scrolling works without focus juggling
+    if (rect_contains(state.list_rect, column, row)) {
+        let length = state.filtered_indices().len();
+        move_table(&mut state.table_state, length, delta);
+    } else if (rect_contains(state.detail_rect, column, row)) {
+        match state.detail_tab {
+            DetailTab::Content => {
+                let count = state.detail.as_ref().map(|detail| detail.files.len()).unwrap_or(0);
+                move_table(&mut state.detail_files_state, count, delta);
+            }
+            DetailTab::Peers => {
+                let count = state.detail.as_ref().map(|detail| detail.peers.len()).unwrap_or(0);
+                move_table(&mut state.detail_peers_state, count, delta);
+            }
+            _ => {}
+        }
+    } else if (rect_contains(state.sidebar_rect, column, row)) {
+        move_list(&mut state.sidebar_state, StatusFilter::ALL.len(), delta);
+        state.apply_sidebar_selection();
+    }
+}
+
 fn toggle_pause(state: &mut AppState) {
     let Some(index) = state.selected_torrent_index() else { return; };
     let Some(torrent) = state.torrents.get(index) else { return; };
@@ -1012,7 +1146,12 @@ fn draw_main(frame: &mut ratatui::Frame, state: &mut AppState) {
         Layout::horizontal([Constraint::Length(0), Constraint::Min(0)]).split(main)
     };
 
-    if (state.show_sidebar) { draw_sidebar(frame, with_sidebar[0], state); }
+    if (state.show_sidebar) {
+        state.sidebar_rect = with_sidebar[0];
+        draw_sidebar(frame, with_sidebar[0], state);
+    } else {
+        state.sidebar_rect = Rect::default();
+    }
 
     let center = with_sidebar[1];
     let center_split = if (state.show_detail) {
@@ -1021,8 +1160,15 @@ fn draw_main(frame: &mut ratatui::Frame, state: &mut AppState) {
         Layout::vertical([Constraint::Min(0), Constraint::Length(0)]).split(center)
     };
 
+    state.list_rect = center_split[0];
     draw_torrent_list(frame, center_split[0], state);
-    if (state.show_detail) { draw_detail(frame, center_split[1], state); }
+    if (state.show_detail) {
+        state.detail_rect = center_split[1];
+        draw_detail(frame, center_split[1], state);
+    } else {
+        state.detail_rect = Rect::default();
+        state.detail_tab_bar_rect = Rect::default();
+    }
 
     draw_status_bar(frame, outer[2], state);
     draw_hint_bar(frame, outer[3]);
@@ -1161,6 +1307,7 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
 
     let split = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
 
+    state.detail_tab_bar_rect = split[0];
     let tab_titles: Vec<Line> = DetailTab::ALL.iter()
         .map(|tab| Line::from(tab.label()))
         .collect();

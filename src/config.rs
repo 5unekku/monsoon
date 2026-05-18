@@ -238,4 +238,22 @@ impl Config {
     pub fn categories_path() -> Result<PathBuf> {
         Ok(Self::proj_dirs()?.config_dir().join("categories.toml"))
     }
+
+    /// pidfile location for daemons launched via `rustor daemon --detach`.
+    /// lives alongside the socket so `rustor status` / `rustor kill` find it
+    /// without consulting the daemon itself.
+    pub fn pid_path() -> Result<PathBuf> {
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            let path = PathBuf::from(runtime_dir);
+            if (path.exists()) {
+                return Ok(path.join("rustor.pid"));
+            }
+        }
+        Ok(Self::data_dir()?.join("rustor.pid"))
+    }
+
+    /// where stdout/stderr go when the daemon is detached
+    pub fn log_path() -> Result<PathBuf> {
+        Ok(Self::proj_dirs()?.data_dir().join("daemon.log"))
+    }
 }
