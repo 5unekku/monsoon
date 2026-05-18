@@ -55,6 +55,10 @@ enum Commands {
         detach: bool,
     },
 
+    /// list available network interfaces and their addresses. useful when
+    /// configuring listen_interfaces in config.toml.
+    Interfaces,
+
     /// show whether the daemon is running, its pid, socket path, and version
     Status,
 
@@ -272,6 +276,7 @@ fn main() -> Result<()> {
         }
         Some(Commands::Status) => print_daemon_status(),
         Some(Commands::Kill) => send_sigterm_to_daemon(),
+        Some(Commands::Interfaces) => print_interfaces(),
         Some(Commands::Service { action }) => run_service_command(action),
         Some(command) => {
             let request = command_to_request(command);
@@ -286,6 +291,21 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn print_interfaces() -> Result<()> {
+    let mut entries = sources::enumerate_interfaces();
+    entries.sort();
+    if (entries.is_empty()) {
+        println!("(no interfaces detected)");
+        return Ok(());
+    }
+    println!("{:<16} {}", "interface", "address");
+    println!("{}", "─".repeat(40));
+    for (name, address) in entries {
+        println!("{:<16} {}", name, address);
+    }
+    Ok(())
 }
 
 fn resolve_token(explicit: Option<String>) -> Result<String> {
@@ -404,7 +424,8 @@ fn command_to_request(command: Commands) -> Request {
         | Commands::Service { .. }
         | Commands::Tui
         | Commands::Status
-        | Commands::Kill => unreachable!("handled in main"),
+        | Commands::Kill
+        | Commands::Interfaces => unreachable!("handled in main"),
     }
 }
 

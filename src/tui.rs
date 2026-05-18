@@ -502,7 +502,10 @@ fn config_value_string(config: &Config, key: &str) -> String {
 
 struct SettingsState {
     config: Config,
+    /// index into SETTING_FIELDS — always points at a field in the current tab
     selected: usize,
+    /// index into the unique sections list (the "tabs")
+    current_tab: usize,
     /// when Some, an inline editor for the selected field's value is active
     edit_buffer: Option<String>,
     /// last action outcome (success message or daemon error)
@@ -511,10 +514,61 @@ struct SettingsState {
     scroll: u16,
 }
 
+/// distinct sections in SETTING_FIELDS order. each section becomes one tab
+/// in the settings overlay. computed once at startup; if you add a new
+/// section to SETTING_FIELDS, append it here.
+fn section_tabs() -> Vec<&'static str> {
+    let mut seen: Vec<&'static str> = Vec::new();
+    for field in SETTING_FIELDS {
+        if (!seen.contains(&field.section)) { seen.push(field.section); }
+    }
+    seen
+}
+
+/// indices into SETTING_FIELDS that belong to the given section, in order.
+fn section_field_indices(section: &str) -> Vec<usize> {
+    SETTING_FIELDS.iter().enumerate()
+        .filter(|(_, field)| field.section == section)
+        .map(|(index, _)| index)
+        .collect()
+}
+
 impl SettingsState {
     fn load() -> Result<Self> {
         let config = fetch_config()?;
-        Ok(Self { config, selected: 0, edit_buffer: None, status: None, scroll: 0 })
+        Ok(Self {
+            config,
+            selected: 0,
+            current_tab: 0,
+            edit_buffer: None,
+            status: None,
+            scroll: 0,
+        })
+    }
+
+    /// indices of fields visible in the current tab. drives navigation +
+    /// selection bounds.
+    fn current_tab_indices(&self) -> Vec<usize> {
+        let tabs = section_tabs();
+        if let Some(section) = tabs.get(self.current_tab) {
+            section_field_indices(section)
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn switch_tab(&mut self, delta: isize) {
+        let tabs = section_tabs();
+        if (tabs.is_empty()) { return; }
+        let length = tabs.len() as isize;
+        let next = (self.current_tab as isize + delta).rem_euclid(length) as usize;
+        self.current_tab = next;
+        // reset selection to the first field in the new tab
+        if let Some(first) = self.current_tab_indices().first().copied() {
+            self.selected = first;
+        }
+        self.scroll = 0;
+        self.edit_buffer = None;
     }
 
     fn refresh_config(&mut self) {
@@ -524,10 +578,12 @@ impl SettingsState {
     }
 
     fn move_selection(&mut self, delta: isize) {
-        let length = SETTING_FIELDS.len() as isize;
-        if (length == 0) { return; }
-        let next = (self.selected as isize + delta).rem_euclid(length) as usize;
-        self.selected = next;
+        let indices = self.current_tab_indices();
+        if (indices.is_empty()) { return; }
+        let current_position = indices.iter().position(|index| *index == self.selected).unwrap_or(0);
+        let length = indices.len() as isize;
+        let next = (current_position as isize + delta).rem_euclid(length) as usize;
+        self.selected = indices[next];
     }
 
     fn current_field(&self) -> &'static SettingField {
@@ -2109,8 +2165,33 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
         (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => settings.move_selection(-1),
         (KeyCode::PageDown, _) => settings.move_selection(5),
         (KeyCode::PageUp, _) => settings.move_selection(-5),
-        (KeyCode::Home, _) => settings.selected = 0,
-        (KeyCode::End, _) => settings.selected = SETTING_FIELDS.len().saturating_sub(1),
+        (KeyCode::Home, _) => {
+            if let Some(first) = settings.current_tab_indices().first().copied() {
+                settings.selected = first;
+            }
+        }
+        (KeyCode::End, _) => {
+            if let Some(last) = settings.current_tab_indices().last().copied() {
+                settings.selected = last;
+            }
+        }
+        // tab cycles tabs forward; shift+tab cycles backward
+        (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => settings.switch_tab(-1),
+        (KeyCode::Tab, _) => settings.switch_tab(1),
+        // a / d  or  ←/→ also cycle tabs (consistent with wasd-left/right)
+        (KeyCode::Char('a'), KeyModifiers::NONE) | (KeyCode::Left, _) => settings.switch_tab(-1),
+        (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Right, _) => settings.switch_tab(1),
+        // number keys jump direct
+        (KeyCode::Char(character), KeyModifiers::NONE) if character.is_ascii_digit() => {
+            let target = character.to_digit(10).unwrap_or(0) as usize;
+            if (target >= 1 && target <= section_tabs().len()) {
+                settings.current_tab = target - 1;
+                if let Some(first) = settings.current_tab_indices().first().copied() {
+                    settings.selected = first;
+                }
+                settings.scroll = 0;
+            }
+        }
         (KeyCode::Enter, _) => activate_field(settings),
         _ => {}
     }
@@ -2157,6 +2238,7 @@ fn draw_settings(frame: &mut ratatui::Frame, state: &mut AppState) {
 
     let outer = Layout::vertical([
         Constraint::Length(1), // title
+        Constraint::Length(2), // tab bar
         Constraint::Min(0),    // body
         Constraint::Length(2), // description + status
         Constraint::Length(1), // hint
@@ -2173,30 +2255,63 @@ fn draw_settings(frame: &mut ratatui::Frame, state: &mut AppState) {
     ]);
     frame.render_widget(Paragraph::new(title), outer[0]);
 
-    draw_settings_body(frame, outer[1], settings);
-    draw_settings_footer(frame, outer[2], settings);
-    draw_settings_hint(frame, outer[3], settings);
+    draw_settings_tab_bar(frame, outer[1], settings);
+    draw_settings_body(frame, outer[2], settings);
+    draw_settings_footer(frame, outer[3], settings);
+    draw_settings_hint(frame, outer[4], settings);
+}
+
+/// Netflix-row style tab bar: previous tab dimmed on the left, current
+/// centered + highlighted, next dimmed on the right. wraps around so the
+/// last tab's "next" is the first tab.
+fn draw_settings_tab_bar(frame: &mut ratatui::Frame, area: Rect, settings: &SettingsState) {
+    let tabs = section_tabs();
+    if (tabs.is_empty()) { return; }
+    let count = tabs.len();
+    let current_index = settings.current_tab.min(count - 1);
+    let previous_index = (current_index + count - 1) % count;
+    let next_index = (current_index + 1) % count;
+
+    let previous = tabs[previous_index];
+    let current = tabs[current_index];
+    let next = tabs[next_index];
+
+    let position_marker = format!("[{}/{}]", current_index + 1, count);
+
+    let line = Line::from(vec![
+        Span::raw(" "),
+        Span::styled("‹ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(previous, Style::default().fg(Color::DarkGray)),
+        Span::raw("   "),
+        Span::styled(
+            format!(" {} ", current),
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(Color::Black)
+                .bg(Color::Cyan),
+        ),
+        Span::raw("   "),
+        Span::styled(next, Style::default().fg(Color::DarkGray)),
+        Span::styled(" ›", Style::default().fg(Color::DarkGray)),
+        Span::raw("   "),
+        Span::styled(position_marker, Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(line).alignment(Alignment::Center),
+        area,
+    );
 }
 
 fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut SettingsState) {
-    // build display rows + a parallel index recording which display row contains
-    // which field. used to drive the scroll offset.
+    let indices = settings.current_tab_indices();
     let mut lines: Vec<Line> = Vec::new();
-    let mut field_to_row: Vec<u16> = vec![0; SETTING_FIELDS.len()];
-    let mut current_section: &str = "";
+    let mut field_to_row: std::collections::HashMap<usize, u16> = std::collections::HashMap::new();
 
-    for (index, field) in SETTING_FIELDS.iter().enumerate() {
-        if (field.section != current_section) {
-            if (!lines.is_empty()) { lines.push(Line::from("")); }
-            lines.push(Line::from(Span::styled(
-                format!(" {} ", field.section),
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )));
-            current_section = field.section;
-        }
+    for index in &indices {
+        let field = &SETTING_FIELDS[*index];
         let value = config_value_string(&settings.config, field.key);
-        let display_value = render_value(settings, index, &value);
-        let is_selected = index == settings.selected;
+        let display_value = render_value(settings, *index, &value);
+        let is_selected = *index == settings.selected;
         let marker = if (is_selected) { "▌ " } else { "  " };
         let label_style = if (is_selected) {
             Style::default().add_modifier(Modifier::BOLD).fg(Color::White)
@@ -2223,21 +2338,21 @@ fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut Set
             ));
         }
         lines.push(Line::from(spans));
-        field_to_row[index] = (lines.len() - 1) as u16;
+        field_to_row.insert(*index, (lines.len() - 1) as u16);
     }
 
-    // adjust scroll so the selected field stays inside the visible window.
-    // viewport_height = inner height (area.height minus the rounded border on
-    // top and bottom = 2).
     let viewport_height = area.height.saturating_sub(2);
-    let selected_row = field_to_row[settings.selected];
-    if (selected_row < settings.scroll) {
-        settings.scroll = selected_row;
-    } else if (viewport_height > 0 && selected_row >= settings.scroll + viewport_height) {
-        settings.scroll = selected_row + 1 - viewport_height;
+    if let Some(selected_row) = field_to_row.get(&settings.selected).copied() {
+        if (selected_row < settings.scroll) {
+            settings.scroll = selected_row;
+        } else if (viewport_height > 0 && selected_row >= settings.scroll + viewport_height) {
+            settings.scroll = selected_row + 1 - viewport_height;
+        }
+        let max_scroll = (lines.len() as u16).saturating_sub(viewport_height);
+        if (settings.scroll > max_scroll) { settings.scroll = max_scroll; }
+    } else {
+        settings.scroll = 0;
     }
-    let max_scroll = (lines.len() as u16).saturating_sub(viewport_height);
-    if (settings.scroll > max_scroll) { settings.scroll = max_scroll; }
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -2303,10 +2418,14 @@ fn draw_settings_hint(frame: &mut ratatui::Frame, area: Rect, settings: &Setting
         Line::from(vec![
             Span::styled(" w/s ", Style::default().fg(Color::Yellow)),
             Span::raw("move  "),
+            Span::styled("a/d / tab ", Style::default().fg(Color::Yellow)),
+            Span::raw("switch tab  "),
+            Span::styled("1..9 ", Style::default().fg(Color::Yellow)),
+            Span::raw("jump  "),
             Span::styled("enter ", Style::default().fg(Color::Yellow)),
-            Span::raw("edit / toggle  "),
+            Span::raw("edit/toggle  "),
             Span::styled("esc ", Style::default().fg(Color::Yellow)),
-            Span::raw("return to main  "),
+            Span::raw("return  "),
             Span::styled("^c ", Style::default().fg(Color::Yellow)),
             Span::raw("quit"),
         ])

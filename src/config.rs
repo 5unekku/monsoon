@@ -5,7 +5,15 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    /// legacy: single ip-or-name. preserved for migration. when
+    /// `listen_interfaces` is non-empty, this field is ignored.
     pub listen_address: String,
+    /// list of interface names (e.g. "tun0", "wlan0") OR ip addresses.
+    /// each entry is resolved to its current ip at session start via
+    /// getifaddrs and the union is comma-joined for libtorrent. when
+    /// empty, the daemon falls back to `listen_address`.
+    #[serde(default)]
+    pub listen_interfaces: Vec<String>,
     pub listen_port: u16,
     /// upload slot limit (-1 = unlimited)
     pub max_uploads: i32,
@@ -150,6 +158,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen_address: "0.0.0.0".to_string(),
+            listen_interfaces: Vec::new(),
             listen_port: 6881,
             max_uploads: -1,
             max_connections: 200,

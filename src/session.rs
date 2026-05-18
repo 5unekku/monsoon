@@ -17,7 +17,18 @@ pub struct Session {
 
 impl Session {
     pub fn new(config: &crate::config::Config) -> Result<Self> {
-        let listen = format!("{}:{}", config.listen_address, config.listen_port);
+        // listen_interfaces takes precedence when non-empty: each entry is
+        // either an interface name (resolved via getifaddrs) or an ip. when
+        // empty we fall back to the legacy listen_address single value.
+        let listen = if (!config.listen_interfaces.is_empty()) {
+            let ips = crate::sources::resolve_listen_ips(&config.listen_interfaces);
+            ips.iter()
+                .map(|ip| format!("{}:{}", ip, config.listen_port))
+                .collect::<Vec<_>>()
+                .join(",")
+        } else {
+            format!("{}:{}", config.listen_address, config.listen_port)
+        };
         let alert_mask = ALERT_STATUS | ALERT_ERROR | ALERT_TRACKER
             | ALERT_STORAGE | ALERT_PROGRESS | ALERT_PORT_MAPPING;
         let settings = config_to_settings(config);

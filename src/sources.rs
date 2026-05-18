@@ -6,9 +6,58 @@
 //! - /absolute/path/to/x.torrent            (linux/macos)
 //! - C:\path\to\x.torrent                   (windows, case-insensitive)
 //! - ~/foo.torrent or ~user/foo.torrent     (expanded to home dir)
+//!
+//! also exposes network-interface enumeration so listen_interfaces in
+//! config.toml can be specified by interface name (e.g. "tun0") instead
+//! of by raw ip.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
+
+/// enumerate available network interfaces. cross-platform: uses
+/// getifaddrs() on unix and GetAdaptersAddresses on windows via the
+/// if-addrs crate. returned tuples are (interface_name, ip_string).
+pub fn enumerate_interfaces() -> Vec<(String, String)> {
+    if_addrs::get_if_addrs()
+        .map(|interfaces| {
+            interfaces.into_iter()
+                .map(|interface| (interface.name.clone(), interface.addr.ip().to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// resolve a list of interface-name-or-ip entries into ip strings ready
+/// to be joined for libtorrent's `listen_interfaces` setting. unknown
+/// names are dropped with a log line. when the resolution would be empty
+/// (no entries, or no matches) we fall back to `["0.0.0.0"]`.
+pub fn resolve_listen_ips(entries: &[String]) -> Vec<String> {
+    if (entries.is_empty()) { return vec!["0.0.0.0".to_string()]; }
+    let interfaces = enumerate_interfaces();
+    let mut resolved: Vec<String> = Vec::new();
+    for entry in entries {
+        let entry = entry.trim();
+        if (entry.is_empty()) { continue; }
+        if (entry.parse::<std::net::IpAddr>().is_ok()) {
+            resolved.push(entry.to_string());
+            continue;
+        }
+        let matches: Vec<&String> = interfaces.iter()
+            .filter(|(name, _)| name == entry)
+            .map(|(_, ip)| ip)
+            .collect();
+        if (matches.is_empty()) {
+            tracing::warn!(entry, "interface not found; skipping");
+            continue;
+        }
+        for ip in matches { resolved.push(ip.clone()); }
+    }
+    if (resolved.is_empty()) {
+        vec!["0.0.0.0".to_string()]
+    } else {
+        resolved
+    }
+}
 
 pub enum Source {
     /// magnet uri — handed directly to libtorrent
