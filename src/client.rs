@@ -11,19 +11,34 @@ use std::time::Duration;
 const SPAWN_WAIT_MS: u64 = 50;
 const SPAWN_MAX_RETRIES: u32 = 40; // 2 second total
 
+/// Check if the local daemon is already running and actively accepting connections
+#[allow(dead_code)]
+pub fn is_local_daemon_running() -> bool {
+    if let Ok(socket_path) = Config::socket_path() {
+        UnixStream::connect(&socket_path).is_ok()
+    } else {
+        false
+    }
+}
+
 /// send a request to the daemon, auto-spawning it silently if not running
 pub fn send(request: Request) -> Result<Response> {
     let socket_path = Config::socket_path()?;
 
     // try to connect; if it fails, spawn the daemon quietly and retry
-    if (!socket_path.exists()) {
-        spawn_daemon_quiet()?;
-        wait_for_socket(&socket_path)?;
-    }
+    let mut stream = match UnixStream::connect(&socket_path) {
+        Ok(s) => s,
+        Err(_) => {
+            if socket_path.exists() {
+                // remove stale socket path from a previous crash before spawning
+                let _ = std::fs::remove_file(&socket_path);
+            }
+            spawn_daemon_quiet()?;
+            wait_for_socket(&socket_path)?;
+            UnixStream::connect(&socket_path).context("connect to self-spawned daemon")?
+        }
+    };
 
-    let mut stream = UnixStream::connect(&socket_path).context(
-        "connect to daemon — try: rustor daemon"
-    )?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 

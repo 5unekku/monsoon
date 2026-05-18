@@ -1205,7 +1205,7 @@ fn write_pidfile() -> Result<std::path::PathBuf> {
         if let Ok(text) = std::fs::read_to_string(&path) {
             if let Ok(existing_pid) = text.trim().parse::<i32>() {
                 // probe with signal 0 — non-zero means the process is gone
-                let alive = unsafe { kill_probe(existing_pid) == 0 };
+                let alive = crate::process::is_alive(existing_pid);
                 if (alive) {
                     anyhow::bail!(
                         "another daemon (pid {}) is already running. \
@@ -1221,21 +1221,59 @@ fn write_pidfile() -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-#[cfg(unix)]
-unsafe extern "C" {
-    fn kill(pid: i32, signal: i32) -> i32;
+
+/// if a daemon is already running, return its pid. used to decide whether to
+/// attach (interactive TTY) or refuse (service/pipe context) on `rustor daemon`.
+fn existing_daemon_pid() -> Option<i32> {
+    let path = Config::pid_path().ok()?;
+    let text = std::fs::read_to_string(&path).ok()?;
+    let pid = text.trim().parse::<i32>().ok()?;
+    if (crate::process::is_alive(pid)) { Some(pid) } else { None }
 }
 
-#[cfg(unix)]
-unsafe fn kill_probe(pid: i32) -> i32 {
-    unsafe { kill(pid, 0) }
+/// follow the running daemon's log via `tail -f`. ctrl-c just detaches the
+/// view; the daemon keeps running. used when `rustor daemon` is invoked from
+/// an interactive shell while another daemon is already up.
+fn attach_to_daemon_log(pid: i32) -> Result<()> {
+    let log_path = Config::log_path()?;
+    println!("daemon already running (pid {}); attaching to log", pid);
+    println!("log: {}", log_path.display());
+    println!("(ctrl-c detaches; daemon keeps running. use `rustor kill` to stop it)");
+    if (!log_path.exists()) {
+        // daemon may have been started in the foreground (no log file). just
+        // wait for the user to ctrl-c since there's nothing to tail.
+        println!("(no log file — daemon is running in the foreground elsewhere)");
+        let shutdown = Arc::new(AtomicBool::new(false));
+        signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))?;
+        signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))?;
+        while (!shutdown.load(Ordering::Relaxed)) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        return Ok(());
+    }
+    let status = std::process::Command::new("tail")
+        .arg("-n").arg("50")
+        .arg("-f")
+        .arg(&log_path)
+        .status()
+        .context("spawn tail -f")?;
+    let _ = status;
+    Ok(())
 }
-
-#[cfg(not(unix))]
-unsafe fn kill_probe(_pid: i32) -> i32 { -1 }
 
 /// run the daemon in the foreground — blocks until SIGTERM/SIGINT or a Shutdown request
 pub fn run(quiet: bool) -> Result<()> {
+    // if another daemon is already up and we're on an interactive terminal,
+    // attach to its log rather than failing. service/pipe contexts (systemd,
+    // shell scripts) fall through to the normal pidfile error so accidental
+    // double-starts are still caught.
+    if let Some(pid) = existing_daemon_pid() {
+        use std::io::IsTerminal;
+        if (std::io::stdout().is_terminal()) {
+            return attach_to_daemon_log(pid);
+        }
+    }
+
     if (!quiet) {
         tracing_subscriber::fmt()
             .with_env_filter(

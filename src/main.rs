@@ -13,6 +13,8 @@ mod session;
 mod sources;
 mod tui;
 
+mod autostart;
+mod process;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ipc::Request;

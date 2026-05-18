@@ -29,5 +29,9 @@ if-addrs = "0.13"
 [build-dependencies]
 cxx-build = "1.0"
 
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+winreg = "0.56.0"
+
 [package.metadata.cargo-machete]
 ignored = ["cxx-build"]
