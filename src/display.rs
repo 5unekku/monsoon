@@ -210,6 +210,21 @@ fn print_categories(entries: &[CategoryInfo]) {
     }
 }
 
+/// like [`truncate`] but PADS the result to exactly `max_cells` if the
+/// input is shorter. used by the tui torrent list header so column labels
+/// fill the column slot rather than ending early at the cell boundary.
+pub fn truncate_to_width(string: &str, max_cells: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let truncated = truncate(string, max_cells);
+    let cells = UnicodeWidthStr::width(truncated.as_str());
+    if (cells < max_cells) {
+        let pad = max_cells - cells;
+        format!("{}{}", truncated, " ".repeat(pad))
+    } else {
+        truncated
+    }
+}
+
 /// truncate to a display-width budget (cells, not chars). CJK / emoji /
 /// combining marks are accounted for via unicode-width so columns don't
 /// shift when the data contains wide characters. an ellipsis (1 cell) is

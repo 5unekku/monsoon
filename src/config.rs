@@ -120,6 +120,11 @@ pub struct Config {
     /// "use built-in defaults". valid keys live in tui::columns.
     #[serde(default)]
     pub tui_columns: Vec<String>,
+    /// per-column width overrides for the torrent list, written by the
+    /// mouse-driven drag-to-resize. format is "column_key=cells". columns
+    /// without an entry use their built-in default width.
+    #[serde(default)]
+    pub tui_column_widths: std::collections::BTreeMap<String, u16>,
     /// when true, the tui renders nerd font glyphs (`󰇚` etc.) instead of
     /// ascii state labels. off by default so users without a nerd-font
     /// terminal see legible text instead of tofu.
@@ -205,6 +210,7 @@ impl Default for Config {
             tui_sidebar_width: default_tui_sidebar_width(),
             tui_detail_split_percent: default_tui_detail_split_percent(),
             tui_columns: Vec::new(),
+            tui_column_widths: std::collections::BTreeMap::new(),
             tui_nerd_font: false,
             network_listen_address: String::new(),
             network_auth_token: String::new(),

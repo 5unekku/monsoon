@@ -140,21 +140,24 @@ impl Column {
         }
     }
 
-    fn width(&self) -> Constraint {
+    /// default width in cells (used when no per-column override is set in
+    /// config). all columns use a concrete number so the manual layout +
+    /// drag-resize math has predictable inputs.
+    fn default_width_cells(&self) -> u16 {
         match self {
-            Column::Index => Constraint::Length(4),
-            Column::Name => Constraint::Min(20),
-            Column::State => Constraint::Length(4),
-            Column::Progress => Constraint::Length(7),
-            Column::Down | Column::Up => Constraint::Length(12),
-            Column::Peers => Constraint::Length(8),
-            Column::Seeds => Constraint::Length(7),
-            Column::Size | Column::Downloaded | Column::Uploaded => Constraint::Length(10),
-            Column::AddedOn | Column::CompletedOn => Constraint::Length(19),
-            Column::SavePath => Constraint::Min(20),
-            Column::Category => Constraint::Length(12),
-            Column::Tags => Constraint::Min(10),
-            Column::InfoHash => Constraint::Length(40),
+            Column::Index => 4,
+            Column::Name => 24,
+            Column::State => 4,
+            Column::Progress => 7,
+            Column::Down | Column::Up => 12,
+            Column::Peers => 8,
+            Column::Seeds => 7,
+            Column::Size | Column::Downloaded | Column::Uploaded => 10,
+            Column::AddedOn | Column::CompletedOn => 19,
+            Column::SavePath => 24,
+            Column::Category => 12,
+            Column::Tags => 12,
+            Column::InfoHash => 40,
         }
     }
 
@@ -189,6 +192,57 @@ const DEFAULT_COLUMNS: &[Column] = &[
     Column::Index, Column::Name, Column::State, Column::Progress,
     Column::Down, Column::Up, Column::Peers,
 ];
+
+/// minimum column width — even a fully-dragged-down column keeps this many
+/// cells so its label remains at least partially legible.
+const MIN_COLUMN_WIDTH: u16 = 3;
+
+/// compute the on-screen widths for every visible column, totalling exactly
+/// `available - (n - 1)` cells (one cell between each adjacent pair of
+/// columns is reserved for the divider character). the LAST column absorbs
+/// any leftover space so the right edge of the table always reaches the
+/// right border of the pane.
+fn compute_column_widths(
+    visible: &[Column],
+    overrides: &std::collections::BTreeMap<String, u16>,
+    available: u16,
+) -> Vec<u16> {
+    let count = visible.len();
+    if (count == 0) { return Vec::new(); }
+    let separator_cells = (count.saturating_sub(1)) as u16;
+    let usable = available.saturating_sub(separator_cells);
+    let mut widths = vec![0u16; count];
+    let mut consumed: u16 = 0;
+    // all but the last column take their override-or-default
+    let fixed_count = count.saturating_sub(1);
+    for index in 0..fixed_count {
+        let column = visible[index];
+        let proposed = overrides.get(column.key()).copied()
+            .unwrap_or_else(|| column.default_width_cells())
+            .max(MIN_COLUMN_WIDTH);
+        let remaining = usable.saturating_sub(consumed);
+        // leave at least MIN_COLUMN_WIDTH for the last column
+        let cap = remaining.saturating_sub(MIN_COLUMN_WIDTH);
+        let actual = proposed.min(cap);
+        widths[index] = actual;
+        consumed += actual;
+    }
+    widths[count - 1] = usable.saturating_sub(consumed).max(MIN_COLUMN_WIDTH);
+    widths
+}
+
+/// active drag-to-resize on a column header divider.
+#[derive(Clone, Copy)]
+struct ColumnDrag {
+    /// index in `visible_columns` of the column whose right edge is being dragged.
+    /// dragging this divider stretches column[index] and shrinks column[index+1]
+    /// (the column to the left of the divider is the one being resized).
+    column_index: usize,
+    /// terminal column of the cursor when the drag started
+    start_x: u16,
+    /// width of the dragged column at drag start
+    start_width: u16,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum StatusFilter {
@@ -732,6 +786,15 @@ struct AppState {
     last_click: Option<(Instant, u16, u16)>,
     /// columns shown in the torrent list, in display order
     visible_columns: Vec<Column>,
+    /// per-column width overrides, loaded from config and updated by drag-resize
+    column_width_overrides: std::collections::BTreeMap<String, u16>,
+    /// boundary x-positions (right edge of each non-last column). recomputed
+    /// every draw and used by the mouse handler for divider hit-testing.
+    column_boundaries: Vec<u16>,
+    /// header row's y position from the last draw; mouse uses this for hit-test
+    header_y: u16,
+    /// active drag-resize, set on mouse Down over a divider and cleared on Up
+    column_drag: Option<ColumnDrag>,
     /// when Some, the column picker overlay is open (selection index)
     column_picker: Option<usize>,
     /// folder paths that are currently collapsed in the content tab
@@ -752,14 +815,16 @@ impl AppState {
 
         // load [tui] defaults from config.toml. failure here is non-fatal —
         // worst case the user sees built-in defaults until they fix the file.
-        let (show_sidebar, show_detail, configured_columns, nerd_font) = Config::load()
-            .map(|config| (
-                config.tui_show_sidebar,
-                config.tui_show_detail,
-                config.tui_columns,
-                config.tui_nerd_font,
-            ))
-            .unwrap_or((false, false, Vec::new(), false));
+        let (show_sidebar, show_detail, configured_columns, nerd_font, configured_widths) =
+            Config::load()
+                .map(|config| (
+                    config.tui_show_sidebar,
+                    config.tui_show_detail,
+                    config.tui_columns,
+                    config.tui_nerd_font,
+                    config.tui_column_widths,
+                ))
+                .unwrap_or((false, false, Vec::new(), false, std::collections::BTreeMap::new()));
 
         // truecolor probe — most modern terminals export COLORTERM=truecolor.
         // we don't use the result much (ratatui maps to whatever the terminal
@@ -808,6 +873,10 @@ impl AppState {
             detail_tab_bar_rect: Rect::default(),
             last_click: None,
             visible_columns,
+            column_width_overrides: configured_widths,
+            column_boundaries: Vec::new(),
+            header_y: 0,
+            column_drag: None,
             column_picker: None,
             collapsed_folders: std::collections::BTreeSet::new(),
             truecolor,
@@ -1376,10 +1445,40 @@ fn handle_mouse(event: MouseEvent, state: &mut AppState) {
     let row = event.row;
     match event.kind {
         MouseEventKind::Down(MouseButton::Left) => mouse_left_down(column, row, state),
+        MouseEventKind::Drag(MouseButton::Left) => mouse_drag(column, state),
+        MouseEventKind::Up(MouseButton::Left) => mouse_left_up(state),
         MouseEventKind::ScrollUp => mouse_scroll(column, row, state, -3),
         MouseEventKind::ScrollDown => mouse_scroll(column, row, state, 3),
         _ => {}
     }
+}
+
+/// while a drag-resize is active, recompute the dragged column's width
+/// from the cursor's horizontal delta. the column to the left of the
+/// divider is the one being resized (per the user spec); the column to
+/// the right absorbs the leftover via `compute_column_widths`.
+fn mouse_drag(column: u16, state: &mut AppState) {
+    let Some(drag) = state.column_drag else { return; };
+    let dx = column as i32 - drag.start_x as i32;
+    let new_width = (drag.start_width as i32 + dx).max(MIN_COLUMN_WIDTH as i32) as u16;
+    if let Some(target) = state.visible_columns.get(drag.column_index).copied() {
+        state.column_width_overrides.insert(target.key().to_string(), new_width);
+    }
+}
+
+/// commit the drag-resize: persist the new column_widths to config, clear
+/// the active drag.
+fn mouse_left_up(state: &mut AppState) {
+    if (state.column_drag.is_some()) {
+        state.column_drag = None;
+        persist_column_widths(&state.column_width_overrides);
+    }
+}
+
+fn persist_column_widths(overrides: &std::collections::BTreeMap<String, u16>) {
+    let Ok(mut config) = Config::load() else { return; };
+    config.tui_column_widths = overrides.clone();
+    let _ = config.save();
 }
 
 fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
@@ -1391,6 +1490,23 @@ fn rect_contains(rect: Rect, column: u16, row: u16) -> bool {
 }
 
 fn mouse_left_down(column: u16, row: u16, state: &mut AppState) {
+    // column-divider drag-resize: when the click lands on the header row at
+    // a known boundary x-position, start a drag instead of selecting a row.
+    // boundaries on the data rows are ignored (they're spaces anyway).
+    if (row == state.header_y || row == state.header_y + 1) {
+        if let Some(position) = state.column_boundaries.iter().position(|x| *x == column) {
+            let current_width = state.column_width_overrides
+                .get(state.visible_columns[position].key())
+                .copied()
+                .unwrap_or_else(|| state.visible_columns[position].default_width_cells());
+            state.column_drag = Some(ColumnDrag {
+                column_index: position,
+                start_x: column,
+                start_width: current_width,
+            });
+            return;
+        }
+    }
     // tab bar click — switch detail tab. tab bar lives at the top of the
     // detail pane; each label takes label.width + separator.
     if (rect_contains(state.detail_tab_bar_rect, column, row)) {
@@ -1815,12 +1931,111 @@ fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
 }
 
 fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
-    let header_cells: Vec<Cell> = state.visible_columns.iter()
-        .map(|column| Cell::from(column.label()).style(Style::default().add_modifier(Modifier::BOLD)))
-        .collect();
-    let header = Row::new(header_cells).height(1);
-
     let visible = state.filtered_indices();
+    let title = if (state.daemon_unreachable) {
+        format!(" torrents — {} (daemon unreachable) ", state.status_filter.label())
+    } else if (visible.is_empty()) {
+        format!(" torrents — {} (none) ", state.status_filter.label())
+    } else {
+        format!(" torrents — {} ({}) ", state.status_filter.label(), visible.len())
+    };
+    let border_style = focus_border_style(state.focus == Pane::List);
+
+    // 1. outer rounded block (gives ╭╮╰╯ corners and side borders)
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title(title);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    if (inner.width < 4 || inner.height < 3) { return; }
+
+    // 2. column widths + boundary x-positions (right edge of each non-last
+    //    column = x where a │ divider sits)
+    let widths = compute_column_widths(
+        &state.visible_columns,
+        &state.column_width_overrides,
+        inner.width,
+    );
+    let mut boundaries: Vec<u16> = Vec::with_capacity(widths.len().saturating_sub(1));
+    let mut cursor_x = inner.x;
+    for (index, width) in widths.iter().enumerate() {
+        cursor_x += width;
+        if (index < widths.len() - 1) {
+            boundaries.push(cursor_x);
+            cursor_x += 1;
+        }
+    }
+    state.column_boundaries = boundaries.clone();
+    state.header_y = inner.y;
+
+    // 3. overdraw ┬ on the top border at each boundary x
+    {
+        let buffer = frame.buffer_mut();
+        for boundary_x in &boundaries {
+            if let Some(cell) = buffer.cell_mut((*boundary_x, area.y)) {
+                cell.set_char('┬').set_style(border_style);
+            }
+        }
+    }
+
+    // 4. header row at inner.y. each column label fills its width, with │
+    //    separators between columns
+    let header_y = inner.y;
+    let mut header_x = inner.x;
+    for (index, column) in state.visible_columns.iter().enumerate() {
+        let width = widths[index];
+        let rect = Rect { x: header_x, y: header_y, width, height: 1 };
+        let label_text = crate::display::truncate_to_width(column.label(), width as usize);
+        frame.render_widget(
+            Paragraph::new(Span::styled(label_text, Style::default().add_modifier(Modifier::BOLD))),
+            rect,
+        );
+        header_x += width;
+        if (index < widths.len() - 1) {
+            let buffer = frame.buffer_mut();
+            if let Some(cell) = buffer.cell_mut((header_x, header_y)) {
+                cell.set_char('│').set_style(border_style);
+            }
+            header_x += 1;
+        }
+    }
+
+    // 5. horizontal divider under the header: ├─┼─┼─┤
+    let divider_y = inner.y + 1;
+    if (divider_y < area.y + area.height - 1) {
+        let buffer = frame.buffer_mut();
+        for column_x in inner.x..(inner.x + inner.width) {
+            if let Some(cell) = buffer.cell_mut((column_x, divider_y)) {
+                cell.set_char('─').set_style(border_style);
+            }
+        }
+        for boundary_x in &boundaries {
+            if let Some(cell) = buffer.cell_mut((*boundary_x, divider_y)) {
+                cell.set_char('┼').set_style(border_style);
+            }
+        }
+        if let Some(cell) = buffer.cell_mut((area.x, divider_y)) {
+            cell.set_char('├').set_style(border_style);
+        }
+        if let Some(cell) = buffer.cell_mut((area.x + area.width - 1, divider_y)) {
+            cell.set_char('┤').set_style(border_style);
+        }
+    }
+
+    // 6. data rows: render via Table inside the remaining area below the
+    //    divider. Table handles selection highlight + scroll, with
+    //    column_spacing(1) so the gaps line up with the header │ positions.
+    let data_y = inner.y + 2;
+    if (data_y >= area.y + area.height - 1) { return; }
+    let data_area = Rect {
+        x: inner.x,
+        y: data_y,
+        width: inner.width,
+        height: (area.y + area.height - 1).saturating_sub(data_y),
+    };
     let rows: Vec<Row> = visible.iter().map(|index| {
         let torrent = &state.torrents[*index];
         let row_style = if (torrent.is_paused) {
@@ -1835,30 +2050,11 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
             .collect();
         Row::new(cells).style(row_style)
     }).collect();
-
-    let widths: Vec<Constraint> = state.visible_columns.iter().map(|column| column.width()).collect();
-
-    let title = if (state.daemon_unreachable) {
-        format!(" torrents — {} (daemon unreachable) ", state.status_filter.label())
-    } else if (visible.is_empty()) {
-        format!(" torrents — {} (none) ", state.status_filter.label())
-    } else {
-        format!(" torrents — {} ({}) ", state.status_filter.label(), visible.len())
-    };
-
-    let table = Table::new(rows, widths)
-        .header(header)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(focus_border_style(state.focus == Pane::List))
-                .title(title),
-        )
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
-        .highlight_symbol("▌ ");
-
-    frame.render_stateful_widget(table, area, &mut state.table_state);
+    let constraints: Vec<Constraint> = widths.iter().map(|w| Constraint::Length(*w)).collect();
+    let table = Table::new(rows, constraints)
+        .column_spacing(1)
+        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+    frame.render_stateful_widget(table, data_area, &mut state.table_state);
 }
 
 fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
