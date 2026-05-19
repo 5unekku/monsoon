@@ -313,6 +313,10 @@ enum FieldKind {
     Text,
     /// dropdown of fixed string options; enter cycles to the next one
     Choice(&'static [&'static str]),
+    /// network-interface dropdown. enter opens a picker populated from
+    /// `enumerate_interfaces()` plus an "any" sentinel and a "specific ip"
+    /// escape hatch that drops into the text editor.
+    Interface,
 }
 
 struct SettingField {
@@ -385,8 +389,8 @@ const SETTING_FIELDS: &[SettingField] = &[
         section: "connection",
         key: "listen_address",
         label: "listen address (interface)",
-        description: "bind to a specific NIC ip (e.g. wireguard's interface) to kill-switch traffic if the vpn drops. requires daemon restart.",
-        kind: FieldKind::Text,
+        description: "bind to a specific NIC (e.g. wireguard's interface) to kill-switch traffic if the vpn drops. pick from available interfaces or choose 'specific ip' to enter a raw address. requires daemon restart.",
+        kind: FieldKind::Interface,
         restart_required: true,
     },
     SettingField {
@@ -575,6 +579,28 @@ struct SettingsState {
     status: Option<String>,
     /// scroll offset for the settings body (in terms of display lines)
     scroll: u16,
+    /// when Some, an interface dropdown is open for the current field
+    interface_picker: Option<InterfacePickerState>,
+}
+
+/// list of options shown by the network-interface dropdown. each entry's
+/// `value` is what gets written to config (an empty string means "any";
+/// the magic `__specific__` value triggers a switch to text-edit mode).
+struct InterfacePickerState {
+    items: Vec<(String, String)>,  // (display label, persisted value)
+    selected: usize,
+}
+
+impl InterfacePickerState {
+    fn build() -> Self {
+        let mut items: Vec<(String, String)> = Vec::new();
+        items.push(("any (all interfaces)".to_string(), String::new()));
+        for (name, ip) in crate::sources::enumerate_interfaces() {
+            items.push((format!("{}  ({})", name, ip), name));
+        }
+        items.push(("specific ip…".to_string(), "__specific__".to_string()));
+        Self { items, selected: 0 }
+    }
 }
 
 /// distinct sections in SETTING_FIELDS order. each section becomes one tab
@@ -606,6 +632,7 @@ impl SettingsState {
             edit_buffer: None,
             status: None,
             scroll: 0,
+            interface_picker: None,
         })
     }
 
@@ -747,16 +774,85 @@ impl Prompt {
 
 /// what a Prompt's `enter` should do. names are intentionally bare (no
 /// `Torrent` suffix) because that suffix would repeat on every variant.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum PromptAction {
     Rename,
     Move,
     Add,
+    /// rename an individual file inside the active torrent
+    RenameFile { file_index: usize },
+    /// rename a folder inside the active torrent (recursive prefix rewrite).
+    /// the backend already auto-merges into existing folders as long as no
+    /// individual file paths collide, so no separate merge-confirm flow is
+    /// needed for the common case.
+    RenameFolder { old_prefix: String },
+}
+
+/// per-torrent add-time options collected by the options form before
+/// dispatch. mirrors qbittorrent's add-torrent dialog. first_last and
+/// subfolder are surfaced in the UI but not yet wired to libtorrent —
+/// they're carried so the rest of the form can be designed around them.
+#[derive(Clone)]
+struct AddOptions {
+    start: bool,
+    sequential: bool,
+    first_last: bool,
+    subfolder: SubfolderMode,
+    save_path: String,
+}
+
+impl Default for AddOptions {
+    fn default() -> Self {
+        Self {
+            start: true,
+            sequential: false,
+            first_last: false,
+            subfolder: SubfolderMode::Default,
+            save_path: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubfolderMode { Default, Yes, No }
+
+impl SubfolderMode {
+    fn label(self) -> &'static str {
+        match self {
+            SubfolderMode::Default => "default",
+            SubfolderMode::Yes => "yes",
+            SubfolderMode::No => "no",
+        }
+    }
+    fn cycle(self) -> Self {
+        match self {
+            SubfolderMode::Default => SubfolderMode::Yes,
+            SubfolderMode::Yes => SubfolderMode::No,
+            SubfolderMode::No => SubfolderMode::Default,
+        }
+    }
+}
+
+/// modal form shown after the add-torrent prompt: walks each pending entry
+/// and lets the user tune options before dispatch. on the last entry's
+/// confirm we send every Add together.
+struct AddOptionsForm {
+    entries: Vec<String>,
+    options: Vec<AddOptions>,
+    /// index into `entries` currently being configured
+    current: usize,
+    /// index of the focused field (0..N matches the field-order in
+    /// `draw_add_options_form`)
+    field: usize,
+    /// when Some, the save_path field is in inline-edit mode
+    edit_buffer: Option<String>,
 }
 
 struct AppState {
     mode: Mode,
     prompt: Option<Prompt>,
+    /// add-options form opened after the multi-line add prompt is confirmed
+    add_options: Option<AddOptionsForm>,
     /// inline text field active in the main view. when Some, the main-view
     /// key handler is bypassed and every printable keystroke goes into the
     /// buffer. see [TextInput] for the rationale.
@@ -853,6 +949,7 @@ impl AppState {
         Self {
             mode: Mode::Main,
             prompt: None,
+            add_options: None,
             active_input: None,
             name_filter: String::new(),
             torrents: Vec::new(),
@@ -1000,6 +1097,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     // a higher level is active.
                     let exit = if (state.column_picker.is_some()) {
                         handle_picker_key(key.code, key.modifiers, &mut state)
+                    } else if (state.add_options.is_some()) {
+                        handle_add_options_key(key.code, key.modifiers, &mut state)
                     } else if (state.prompt.is_some()) {
                         handle_prompt_key(key.code, key.modifiers, &mut state)
                     } else if (state.active_input.is_some()) {
@@ -1067,7 +1166,15 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
 
         // actions on the selected torrent
         (KeyCode::Char('p'), KeyModifiers::NONE) => toggle_pause(state),
-        (KeyCode::Char('r'), KeyModifiers::NONE) | (KeyCode::F(2), _) => open_rename_prompt(state),
+        (KeyCode::Char('r'), KeyModifiers::NONE) | (KeyCode::F(2), _) => {
+            // route based on focus: in the content tab, rename the selected
+            // file or folder. otherwise, fall through to torrent rename.
+            if (state.focus == Pane::Detail && state.detail_tab == DetailTab::Content) {
+                open_content_rename_prompt(state);
+            } else {
+                open_rename_prompt(state);
+            }
+        }
         (KeyCode::Char('m'), KeyModifiers::NONE) => open_move_prompt(state),
         (KeyCode::Char('n'), KeyModifiers::NONE)
         | (KeyCode::Char('n'), KeyModifiers::CONTROL) => open_add_prompt(state),
@@ -1078,6 +1185,25 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         // shift+s for sequential toggle (lowercase s is wasd-down)
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
+        // file/folder priority — only when the content tab has focus. digits
+        // map to qbittorrent's priority levels; libtorrent's 0..=7 is folded
+        // into the five buckets the user actually cares about. on folder rows
+        // every descendant file is updated atomically.
+        (KeyCode::Char(character), KeyModifiers::NONE)
+            if (state.focus == Pane::Detail
+                && state.detail_tab == DetailTab::Content
+                && matches!(character, '0' | '1' | '2' | '3' | '4')) =>
+        {
+            let priority = match character {
+                '0' => 0u8,
+                '1' => 1u8,
+                '2' => 4u8,
+                '3' => 6u8,
+                '4' => 7u8,
+                _ => unreachable!(),
+            };
+            set_focused_priority(state, priority);
+        }
         // open the torrent-list name filter. takes over keyboard input via
         // active_input so letters typed into the filter don't trigger
         // sidebar/detail/pause/etc. bindings.
@@ -1126,6 +1252,47 @@ fn open_move_prompt(state: &mut AppState) {
         torrent_index: index,
         allow_multiline: false,
     });
+}
+
+/// open a rename prompt for the selected file or folder inside the content
+/// tab. routes to RenameFile/RenameFolder depending on the selected row.
+fn open_content_rename_prompt(state: &mut AppState) {
+    let Some(torrent_index) = state.selected_torrent_index() else {
+        state.error = Some("no torrent selected".to_string());
+        return;
+    };
+    let Some(detail) = &state.detail else {
+        state.error = Some("file list not loaded".to_string());
+        return;
+    };
+    let rows = build_tree_rows(detail, &state.collapsed_folders);
+    let Some(row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else {
+        state.error = Some("no file selected".to_string());
+        return;
+    };
+
+    if (row.is_folder) {
+        state.prompt = Some(Prompt {
+            title: format!("rename folder \"{}\"", row.full_path),
+            helper: "new folder path (relative to the torrent root). renaming into an existing folder merges automatically; file-on-file collisions are rejected.".to_string(),
+            lines: vec![row.full_path.clone()],
+            cursor_line: 0,
+            action: PromptAction::RenameFolder { old_prefix: row.full_path.clone() },
+            torrent_index,
+            allow_multiline: false,
+        });
+    } else if let Some(file_index) = row.file_index {
+        let Some(file) = detail.files.get(file_index) else { return; };
+        state.prompt = Some(Prompt {
+            title: format!("rename file \"{}\"", row.label),
+            helper: "new path relative to the torrent root. collisions with existing files are rejected.".to_string(),
+            lines: vec![file.path.clone()],
+            cursor_line: 0,
+            action: PromptAction::RenameFile { file_index },
+            torrent_index,
+            allow_multiline: false,
+        });
+    }
 }
 
 fn open_add_prompt(state: &mut AppState) {
@@ -1194,12 +1361,46 @@ fn toggle_sequential(state: &mut AppState) {
 /// is canonical. surfacing this is a TODO; for now the prompt is a no-op
 /// that explains itself.
 fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
-    match prompt.action {
+    match &prompt.action {
         PromptAction::Rename => {
             Err(anyhow::anyhow!(
                 "renaming the torrent name itself is not yet wired. \
-                 use the content tab (e, ]) and F2 to rename individual files."
+                 use the content tab (e, ]) and r to rename individual files."
             ))
+        }
+        PromptAction::RenameFile { file_index } => {
+            match client::send(Request::RenameFile {
+                index: prompt.torrent_index,
+                file_index: *file_index,
+                new_name: prompt.single_line_buffer(),
+            })? {
+                Response::Ok => Ok(()),
+                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
+                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
+        }
+        PromptAction::RenameFolder { old_prefix } => {
+            match client::send(Request::RenameFolder {
+                index: prompt.torrent_index,
+                old_prefix: old_prefix.clone(),
+                new_prefix: prompt.single_line_buffer(),
+            })? {
+                Response::Ok => Ok(()),
+                Response::RenameResult { renamed, rejected } => {
+                    if (rejected.is_empty()) {
+                        state.error = Some(format!("renamed {} file(s)", renamed.len()));
+                        Ok(())
+                    } else {
+                        let summary = rejected.iter()
+                            .map(|(file_index, reason)| format!("#{}: {}", file_index, reason))
+                            .collect::<Vec<_>>()
+                            .join("; ");
+                        Err(anyhow::anyhow!("rejected: {}", summary))
+                    }
+                }
+                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
+                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
         }
         PromptAction::Move => {
             match client::send(Request::Move {
@@ -1212,42 +1413,153 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             }
         }
         PromptAction::Add => {
-            // every non-blank line dispatches a separate Add. errors are
-            // collected so a single bad line doesn't abort the batch.
-            let mut succeeded: Vec<String> = Vec::new();
-            let mut failed: Vec<String> = Vec::new();
-            for line in &prompt.lines {
-                let item = line.trim();
-                if (item.is_empty()) { continue; }
-                let response = client::send(Request::Add {
-                    uri: item.to_string(),
-                    save_path: None,
-                    category: None,
-                });
-                match response {
-                    Ok(Response::Added { id }) => succeeded.push(id),
-                    Ok(Response::Err(message)) => failed.push(format!("{}: {}", item, message)),
-                    Ok(_) => failed.push(format!("{}: unexpected response", item)),
-                    Err(error) => failed.push(format!("{}: {}", item, error)),
-                }
-            }
-            if (succeeded.is_empty() && failed.is_empty()) {
+            // collect non-empty entries and open the per-torrent options
+            // form. nothing hits the daemon yet — the options form owns
+            // the dispatch on its own confirmation.
+            let entries: Vec<String> = prompt.lines.iter()
+                .map(|line| line.trim().to_string())
+                .filter(|line| !line.is_empty())
+                .collect();
+            if (entries.is_empty()) {
                 return Err(anyhow::anyhow!("no sources provided"));
             }
-            if (failed.is_empty()) {
-                state.error = Some(format!("added {} torrent(s)", succeeded.len()));
-                Ok(())
-            } else if (succeeded.is_empty()) {
-                Err(anyhow::anyhow!("all sources failed: {}", failed.join("; ")))
-            } else {
-                state.error = Some(format!(
-                    "added {} ok, {} failed: {}",
-                    succeeded.len(), failed.len(), failed.join("; ")
-                ));
-                Ok(())
-            }
+            let options = vec![AddOptions::default(); entries.len()];
+            state.add_options = Some(AddOptionsForm {
+                entries,
+                options,
+                current: 0,
+                field: 0,
+                edit_buffer: None,
+            });
+            Ok(())
         }
     }
+}
+
+/// total fields on the add-options form. update both this and the field
+/// renderer when adding/removing rows.
+const ADD_OPTIONS_FIELD_COUNT: usize = 5;
+
+fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    let Some(form) = state.add_options.as_mut() else { return false; };
+
+    // text-edit mode for the save_path field
+    if (form.edit_buffer.is_some()) {
+        match (code, modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Esc, _) => form.edit_buffer = None,
+            (KeyCode::Enter, _) => {
+                let buffer = form.edit_buffer.take().unwrap_or_default();
+                if let Some(options) = form.options.get_mut(form.current) {
+                    options.save_path = buffer;
+                }
+            }
+            (KeyCode::Backspace, _) => {
+                if let Some(buffer) = form.edit_buffer.as_mut() { buffer.pop(); }
+            }
+            (KeyCode::Char(character), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                if let Some(buffer) = form.edit_buffer.as_mut() { buffer.push(character); }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Esc, _) => { state.add_options = None; }
+        (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            form.field = (form.field + 1) % ADD_OPTIONS_FIELD_COUNT;
+        }
+        (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            form.field = (form.field + ADD_OPTIONS_FIELD_COUNT - 1) % ADD_OPTIONS_FIELD_COUNT;
+        }
+        // tab advances to the next pending entry (or dispatches on the last one)
+        (KeyCode::Tab, _) => advance_add_options(state),
+        // space/enter toggles or activates the focused field
+        (KeyCode::Enter, _) | (KeyCode::Char(' '), KeyModifiers::NONE) => activate_add_options_field(state),
+        _ => {}
+    }
+    false
+}
+
+fn activate_add_options_field(state: &mut AppState) {
+    let Some(form) = state.add_options.as_mut() else { return; };
+    let field = form.field;
+    let current = form.current;
+    let Some(options) = form.options.get_mut(current) else { return; };
+    match field {
+        0 => options.start = !options.start,
+        1 => options.sequential = !options.sequential,
+        2 => options.first_last = !options.first_last,
+        3 => options.subfolder = options.subfolder.cycle(),
+        4 => form.edit_buffer = Some(options.save_path.clone()),
+        _ => {}
+    }
+}
+
+/// move to the next pending entry. if there are no more, dispatch every
+/// queued Add (and the post-add tweaks for sequential / start) in order.
+fn advance_add_options(state: &mut AppState) {
+    let Some(form) = state.add_options.as_mut() else { return; };
+    if (form.current + 1 < form.entries.len()) {
+        form.current += 1;
+        form.field = 0;
+        return;
+    }
+    // last entry confirmed — dispatch everything
+    let Some(form) = state.add_options.take() else { return; };
+    dispatch_add_options(form, state);
+}
+
+fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
+    let mut succeeded: usize = 0;
+    let mut failures: Vec<String> = Vec::new();
+    for (entry_index, uri) in form.entries.iter().enumerate() {
+        let options = &form.options[entry_index];
+        let save_path = if (options.save_path.trim().is_empty()) { None } else { Some(options.save_path.clone()) };
+        let added_id = match client::send(Request::Add {
+            uri: uri.clone(),
+            save_path,
+            category: None,
+        }) {
+            Ok(Response::Added { id }) => Some(id),
+            Ok(Response::Err(message)) => { failures.push(format!("{}: {}", uri, message)); None }
+            Ok(_) => { failures.push(format!("{}: unexpected response", uri)); None }
+            Err(error) => { failures.push(format!("{}: {}", uri, error)); None }
+        };
+        if (added_id.is_none()) { continue; }
+        succeeded += 1;
+        // the newly-added torrent occupies the highest index in the daemon's
+        // torrent vector; refresh the list so we can target it for follow-up
+        // adjustments. a roundtrip per add keeps the indexing simple.
+        let new_index = match client::send(Request::List) {
+            Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
+            _ => continue,
+        };
+        if (options.sequential) {
+            let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
+        }
+        if (!options.start) {
+            let _ = client::send(Request::Pause { index: new_index });
+        }
+        // first_last and subfolder are surfaced in the UI but not yet wired
+        // to a backend setting — see AddOptions docs.
+    }
+    if (failures.is_empty()) {
+        state.error = Some(format!("added {} torrent(s)", succeeded));
+    } else if (succeeded == 0) {
+        state.error = Some(format!("all sources failed: {}", failures.join("; ")));
+    } else {
+        state.error = Some(format!(
+            "added {} ok, {} failed: {}",
+            succeeded, failures.len(), failures.join("; ")
+        ));
+    }
+    state.last_poll = Instant::now() - POLL_INTERVAL;
 }
 
 fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
@@ -1320,6 +1632,50 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
 /// when the focused row in the content tab is a folder, toggle its collapsed
 /// state. `collapse` true means a-or-left (collapse), false means d-or-right
 /// (expand). on file rows the key is a no-op.
+/// set the priority of the currently-selected row in the content tab. on a
+/// folder row this fans out to every descendant file (recursive). errors from
+/// individual rpc calls are accumulated into state.error.
+fn set_focused_priority(state: &mut AppState, priority: u8) {
+    let Some(torrent_index) = state.selected_torrent_index() else { return; };
+    let Some(detail) = &state.detail else { return; };
+    let rows = build_tree_rows(detail, &state.collapsed_folders);
+    let Some(selected_row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else { return; };
+
+    // collect target file indices. for a leaf row, that's just file_index.
+    // for a folder, walk every descendant file (regardless of the collapsed
+    // view — collapse is presentational, the operation still affects all
+    // descendants).
+    let targets: Vec<usize> = if (selected_row.is_folder) {
+        let prefix = format!("{}/", selected_row.full_path);
+        detail.files.iter().enumerate()
+            .filter(|(_, file)| file.path == selected_row.full_path || file.path.starts_with(&prefix))
+            .map(|(file_index, _)| file_index)
+            .collect()
+    } else if let Some(file_index) = selected_row.file_index {
+        vec![file_index]
+    } else {
+        Vec::new()
+    };
+
+    if (targets.is_empty()) { return; }
+    let mut failures: Vec<String> = Vec::new();
+    for file_index in &targets {
+        match client::send(Request::SetFilePriority { index: torrent_index, file_index: *file_index, priority }) {
+            Ok(Response::Ok) => {}
+            Ok(Response::Err(message)) => failures.push(format!("#{}: {}", file_index, message)),
+            Ok(_) => failures.push(format!("#{}: unexpected response", file_index)),
+            Err(error) => failures.push(format!("#{}: {}", file_index, error)),
+        }
+    }
+    if (failures.is_empty()) {
+        state.error = Some(format!("priority set to {} on {} file(s)", priority, targets.len()));
+    } else {
+        state.error = Some(format!("priority partial: {}", failures.join("; ")));
+    }
+    // refresh detail so the new priorities show up on the next draw
+    state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+}
+
 fn collapse_focused(state: &mut AppState, collapse: bool) {
     if (state.focus != Pane::Detail || state.detail_tab != DetailTab::Content) {
         return;
@@ -1451,6 +1807,13 @@ fn handle_mouse(event: MouseEvent, state: &mut AppState) {
         MouseEventKind::Down(MouseButton::Left) => mouse_left_down(column, row, state),
         MouseEventKind::Drag(MouseButton::Left) => mouse_drag(column, state),
         MouseEventKind::Up(MouseButton::Left) => mouse_left_up(state),
+        // right-click on the header row of the torrent list opens the column
+        // picker. matches the qbittorrent convention.
+        MouseEventKind::Down(MouseButton::Right) => {
+            if (row == state.header_y && rect_contains(state.list_rect, column, row)) {
+                state.column_picker = Some(0);
+            }
+        }
         MouseEventKind::ScrollUp => mouse_scroll(column, row, state, -3),
         MouseEventKind::ScrollDown => mouse_scroll(column, row, state, 3),
         _ => {}
@@ -1672,6 +2035,107 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.column_picker.is_some()) {
         draw_column_picker(frame, state);
     }
+    if (state.add_options.is_some()) {
+        draw_add_options_form(frame, state);
+    }
+}
+
+fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(form) = state.add_options.as_ref() else { return; };
+    let area = frame.area();
+    let width = (area.width * 70 / 100).clamp(50, area.width.saturating_sub(4));
+    let height = 18u16.min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(format!(" add options  ({}/{}) ", form.current + 1, form.entries.len()));
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // uri
+        Constraint::Length(1), // helper
+        Constraint::Length(1), // gap
+        Constraint::Min(0),    // fields
+        Constraint::Length(1), // hint
+    ]).split(inner);
+
+    let uri = form.entries.get(form.current).cloned().unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" source: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(uri, Style::default().fg(Color::Cyan)),
+        ])),
+        layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " tab next entry / dispatch · w/s move · enter toggle · esc cancel",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[1],
+    );
+
+    let options = form.options.get(form.current).cloned().unwrap_or_default();
+    let editing_path = form.edit_buffer.is_some();
+    let path_display = if (editing_path) {
+        format!("[ {}_ ]", form.edit_buffer.as_deref().unwrap_or(""))
+    } else if (options.save_path.is_empty()) {
+        "(default — daemon's default_save_path)".to_string()
+    } else {
+        options.save_path.clone()
+    };
+
+    let rows = [
+        ("start",          format_bool(options.start)),
+        ("sequential",     format_bool(options.sequential)),
+        ("first/last",     format!("{}  (not yet wired)", format_bool(options.first_last))),
+        ("create subfolder", format!("{}  (not yet wired)", options.subfolder.label())),
+        ("download path",  path_display),
+    ];
+    let lines: Vec<Line> = rows.iter().enumerate().map(|(index, (label, value))| {
+        let is_focused = index == form.field;
+        let marker = if (is_focused) { "▌ " } else { "  " };
+        let label_style = if (is_focused) {
+            Style::default().add_modifier(Modifier::BOLD).fg(Color::White)
+        } else {
+            Style::default()
+        };
+        let value_style = if (is_focused && editing_path && index == 4) {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else if (is_focused) {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::Gray)
+        };
+        Line::from(vec![
+            Span::styled(marker, Style::default().fg(Color::Cyan)),
+            Span::styled(format!("{:18}", label), label_style),
+            Span::raw("  "),
+            Span::styled(value.clone(), value_style),
+        ])
+    }).collect();
+    frame.render_widget(Paragraph::new(lines), layout[3]);
+
+    let hint = if (form.current + 1 < form.entries.len()) {
+        " tab → next torrent "
+    } else {
+        " tab → add all "
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(Color::Yellow)))),
+        layout[4],
+    );
+}
+
+fn format_bool(value: bool) -> String {
+    if (value) { "● on".to_string() } else { "○ off".to_string() }
 }
 
 fn draw_column_picker(frame: &mut ratatui::Frame, state: &AppState) {
@@ -1946,6 +2410,7 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     let border_style = focus_border_style(state.focus == Pane::List);
 
     // 1. outer rounded block (gives ╭╮╰╯ corners and side borders)
+    let title_width = crate::display::display_width(&title) as u16;
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
@@ -1975,10 +2440,17 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     state.column_boundaries = boundaries.clone();
     state.header_y = inner.y;
 
-    // 3. overdraw ┬ on the top border at each boundary x
+    // 3. overdraw ┬ on the top border at each boundary x. skip any x that
+    //    falls inside the rendered title text, otherwise the divider chops
+    //    a glyph out of the title (e.g. "torre┬ts").
     {
+        // ratatui renders Block titles starting one cell in from the left
+        // corner. account for that + the rendered width.
+        let title_start = area.x + 1;
+        let title_end = title_start + title_width;
         let buffer = frame.buffer_mut();
         for boundary_x in &boundaries {
+            if (*boundary_x >= title_start && *boundary_x < title_end) { continue; }
             if let Some(cell) = buffer.cell_mut((*boundary_x, area.y)) {
                 cell.set_char('┬').set_style(border_style);
             }
@@ -2100,11 +2572,16 @@ struct TreeRow {
     label: String,
     full_path: String,
     is_folder: bool,
-    #[allow(dead_code)] // wired up for per-file priority editing in a future iteration
     file_index: Option<usize>,
     total_size: i64,
     total_done: i64,
+    /// for files: the libtorrent priority (0..=7).
+    /// for folders: Some(p) when every descendant file shares priority p;
+    /// None when the folder is empty *or* its descendants disagree
+    /// (rendered as "mixed" — see `is_mixed`).
     priority: Option<u8>,
+    /// true only for folder rows whose descendants have differing priorities.
+    is_mixed: bool,
 }
 
 /// build a tree of files from their flat paths. folders aggregate size +
@@ -2156,6 +2633,20 @@ fn build_tree_rows(detail: &TorrentDetail, collapsed: &std::collections::BTreeSe
             });
         let is_collapsed = collapsed.contains(folder);
         let prefix = if (is_collapsed) { "▸ " } else { "▾ " };
+        // aggregate descendant priorities. all-same → Some(p); any disagreement → mixed.
+        let (folder_priority, is_mixed) = {
+            let mut iterator = detail.files.iter()
+                .filter(|file| file.path == *folder
+                    || file.path.starts_with(&format!("{}/", folder)))
+                .map(|file| file.priority);
+            match iterator.next() {
+                None => (None, false),
+                Some(first) => {
+                    let all_same = iterator.all(|priority| priority == first);
+                    if (all_same) { (Some(first), false) } else { (None, true) }
+                }
+            }
+        };
         rows.push(TreeRow {
             indent,
             label: format!("{}{}", prefix, name),
@@ -2164,7 +2655,8 @@ fn build_tree_rows(detail: &TorrentDetail, collapsed: &std::collections::BTreeSe
             file_index: None,
             total_size,
             total_done,
-            priority: None,
+            priority: folder_priority,
+            is_mixed,
         });
         if (is_collapsed) {
             skip_prefix = Some(format!("{}/", folder));
@@ -2201,6 +2693,7 @@ fn build_tree_rows(detail: &TorrentDetail, collapsed: &std::collections::BTreeSe
             total_size: file.size,
             total_done,
             priority: Some(file.priority),
+            is_mixed: false,
         });
     }
 
@@ -2242,14 +2735,18 @@ fn draw_content_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState
         let progress = if (tree_row.total_size > 0) {
             tree_row.total_done as f64 / tree_row.total_size as f64 * 100.0
         } else { 0.0 };
-        let priority_label = match tree_row.priority {
-            None => "—".to_string(),
-            Some(0) => "skip".to_string(),
-            Some(1..=3) => format!("low/{}", tree_row.priority.unwrap()),
-            Some(4) => "normal".to_string(),
-            Some(5..=6) => format!("high/{}", tree_row.priority.unwrap()),
-            Some(7) => "max".to_string(),
-            Some(other) => other.to_string(),
+        let priority_label = if (tree_row.is_mixed) {
+            "mixed".to_string()
+        } else {
+            match tree_row.priority {
+                None => "—".to_string(),
+                Some(0) => "skip".to_string(),
+                Some(1..=3) => format!("low/{}", tree_row.priority.unwrap()),
+                Some(4) => "normal".to_string(),
+                Some(5..=6) => format!("high/{}", tree_row.priority.unwrap()),
+                Some(7) => "max".to_string(),
+                Some(other) => other.to_string(),
+            }
         };
         let row_style = if (tree_row.is_folder) {
             Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
@@ -2449,6 +2946,8 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("reann  "),
         Span::styled("q/e ", Style::default().fg(Color::Yellow)),
         Span::raw("sidebar/detail  "),
+        Span::styled("0-4 ", Style::default().fg(Color::Yellow)),
+        Span::raw("file prio  "),
         Span::styled("/ ", Style::default().fg(Color::Yellow)),
         Span::raw("filter  "),
         Span::styled(", ", Style::default().fg(Color::Yellow)),
@@ -2468,6 +2967,11 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
 
 fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
     let Mode::Settings(settings) = &mut state.mode else { return false; };
+
+    // interface dropdown — captures all input until dismissed
+    if (settings.interface_picker.is_some()) {
+        return handle_interface_picker_key(code, modifiers, settings);
+    }
 
     // active text editor — capture printable input, commit on enter, cancel on esc
     if (settings.edit_buffer.is_some()) {
@@ -2540,6 +3044,35 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
     false
 }
 
+fn handle_interface_picker_key(code: KeyCode, _modifiers: KeyModifiers, settings: &mut SettingsState) -> bool {
+    let Some(picker) = settings.interface_picker.as_mut() else { return false; };
+    match code {
+        KeyCode::Char('c') if _modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Esc | KeyCode::Char('q') => settings.interface_picker = None,
+        KeyCode::Char('s') | KeyCode::Down => {
+            picker.selected = (picker.selected + 1).min(picker.items.len().saturating_sub(1));
+        }
+        KeyCode::Char('w') | KeyCode::Up => {
+            picker.selected = picker.selected.saturating_sub(1);
+        }
+        KeyCode::Home => picker.selected = 0,
+        KeyCode::End => picker.selected = picker.items.len().saturating_sub(1),
+        KeyCode::Enter => {
+            let Some((_, value)) = picker.items.get(picker.selected).cloned() else { return false; };
+            settings.interface_picker = None;
+            let key = settings.current_field().key;
+            if (value == "__specific__") {
+                // drop into the text editor seeded with the current raw value
+                settings.edit_buffer = Some(config_value_string(&settings.config, key));
+            } else {
+                commit_value(settings, key, &value);
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
 fn activate_field(settings: &mut SettingsState) {
     let field = settings.current_field();
     let current = config_value_string(&settings.config, field.key);
@@ -2558,6 +3091,15 @@ fn activate_field(settings: &mut SettingsState) {
         | FieldKind::Float
         | FieldKind::Text => {
             settings.edit_buffer = Some(current);
+        }
+        FieldKind::Interface => {
+            let mut picker = InterfacePickerState::build();
+            // preselect the entry whose persisted value matches the current
+            // config (so the cursor lands on what's already active).
+            if let Some(index) = picker.items.iter().position(|(_, value)| *value == current) {
+                picker.selected = index;
+            }
+            settings.interface_picker = Some(picker);
         }
     }
 }
@@ -2604,6 +3146,61 @@ fn draw_settings(frame: &mut ratatui::Frame, state: &mut AppState) {
     draw_settings_body(frame, outer[2], settings);
     draw_settings_footer(frame, outer[3], settings);
     draw_settings_hint(frame, outer[4], settings);
+
+    if (settings.interface_picker.is_some()) {
+        draw_interface_picker(frame, settings);
+    }
+}
+
+fn draw_interface_picker(frame: &mut ratatui::Frame, settings: &SettingsState) {
+    let Some(picker) = settings.interface_picker.as_ref() else { return; };
+    let area = frame.area();
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = ((picker.items.len() as u16) + 4).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" listen interface ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ]).split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " w/s move  enter pick  esc cancel",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[0],
+    );
+
+    let lines: Vec<Line> = picker.items.iter().enumerate().map(|(index, (label, _))| {
+        let style = if (index == picker.selected) {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(Span::styled(format!(" {} ", label), style))
+    }).collect();
+    frame.render_widget(Paragraph::new(lines), layout[1]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " 'specific ip' lets you type a raw address",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[2],
+    );
 }
 
 /// Netflix-row style tab bar: previous tab dimmed on the left, current
@@ -2730,6 +3327,21 @@ fn render_value(settings: &SettingsState, index: usize, value: &str) -> String {
                 Ok(other) => other.to_string(),
                 Err(_) => value.to_string(),
             }
+        }
+        FieldKind::Interface => {
+            if (value.trim().is_empty()) {
+                return "any (all interfaces)".to_string();
+            }
+            // if the stored value matches an interface name, show "name (ip)";
+            // if it parses as an ip directly, show "ip  [specific ip]"; else as-is.
+            let interfaces = crate::sources::enumerate_interfaces();
+            if let Some((name, ip)) = interfaces.iter().find(|(name, _)| name == value) {
+                return format!("{}  ({})", name, ip);
+            }
+            if (value.parse::<std::net::IpAddr>().is_ok()) {
+                return format!("{}  [specific ip]", value);
+            }
+            value.to_string()
         }
         _ => value.to_string(),
     }

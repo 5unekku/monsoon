@@ -216,6 +216,12 @@ fn print_categories(entries: &[CategoryInfo]) {
 /// like [`truncate`] but PADS the result to exactly `max_cells` if the
 /// input is shorter. used by the tui torrent list header so column labels
 /// fill the column slot rather than ending early at the cell boundary.
+/// display width in cells of a string (CJK / emoji / combining mark aware).
+pub fn display_width(string: &str) -> usize {
+    use unicode_width::UnicodeWidthStr;
+    UnicodeWidthStr::width(string)
+}
+
 pub fn truncate_to_width(string: &str, max_cells: usize) -> String {
     use unicode_width::UnicodeWidthStr;
     let truncated = truncate(string, max_cells);

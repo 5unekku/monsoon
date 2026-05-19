@@ -503,7 +503,11 @@ impl App {
             .map(|(_, file)| file.path.as_str())
             .collect();
 
-        // check both intra-batch and against-the-rest collisions
+        // check both intra-batch and against-the-rest collisions. note that
+        // a folder rename whose target prefix is already a real folder will
+        // merge automatically here: only direct file-vs-file path collisions
+        // are rejected; coexisting files in the same destination directory
+        // are fine.
         let mut planned_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut filtered_plan: Vec<(usize, String)> = Vec::new();
         for (file_index, new_path) in plan {
