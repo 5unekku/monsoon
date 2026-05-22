@@ -865,6 +865,16 @@ struct AppState {
     name_filter: String,
     /// fuzzy filter over file paths in the content tab. empty = tree view.
     content_filter: String,
+    /// lowercase of content_filter, kept in sync. avoids re-lowercasing
+    /// the needle on every match call.
+    content_filter_lc: String,
+    /// lowercased file paths parallel to detail.files. rebuilt once per
+    /// detail poll so fuzzy matching never allocates per file per keystroke.
+    detail_paths_lc: Vec<String>,
+    /// indices into detail.files that match the current content_filter.
+    /// rebuilt once per keypress (not per draw frame). empty when filter
+    /// is empty (tree mode is used instead).
+    content_filter_matches: Vec<usize>,
     torrents: Vec<TorrentInfo>,
     stats: Option<StatsInfo>,
     detail: Option<TorrentDetail>,
@@ -958,6 +968,9 @@ impl AppState {
             active_input: None,
             name_filter: String::new(),
             content_filter: String::new(),
+            content_filter_lc: String::new(),
+            detail_paths_lc: Vec::new(),
+            content_filter_matches: Vec::new(),
             torrents: Vec::new(),
             stats: None,
             detail: None,
@@ -1030,15 +1043,13 @@ impl AppState {
             Pane::Sidebar => move_list(&mut self.sidebar_state, StatusFilter::ALL.len(), delta),
             Pane::Detail => match self.detail_tab {
                 DetailTab::Content => {
-                    let count = self.detail.as_ref()
-                        .map(|detail| {
-                            if self.content_filter.is_empty() {
-                                build_tree_rows(detail, &self.collapsed_folders).len()
-                            } else {
-                                filter_content_rows(detail, &self.content_filter).len()
-                            }
-                        })
-                        .unwrap_or(0);
+                    let count = if self.content_filter_matches.is_empty() && self.content_filter.is_empty() {
+                        self.detail.as_ref()
+                            .map(|detail| build_tree_rows(detail, &self.collapsed_folders).len())
+                            .unwrap_or(0)
+                    } else {
+                        self.content_filter_matches.len()
+                    };
                     move_table(&mut self.detail_files_state, count, delta);
                 }
                 DetailTab::Peers => {
@@ -1292,7 +1303,7 @@ fn open_content_rename_prompt(state: &mut AppState) {
     let rows = if state.content_filter.is_empty() {
         build_tree_rows(detail, &state.collapsed_folders)
     } else {
-        filter_content_rows(detail, &state.content_filter)
+        filter_content_rows(detail, &state.content_filter_matches)
     };
     let Some(row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else {
         state.error = Some("no file selected".to_string());
@@ -1665,7 +1676,7 @@ fn set_focused_priority(state: &mut AppState, priority: u8) {
     let rows = if state.content_filter.is_empty() {
         build_tree_rows(detail, &state.collapsed_folders)
     } else {
-        filter_content_rows(detail, &state.content_filter)
+        filter_content_rows(detail, &state.content_filter_matches)
     };
     let Some(selected_row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else { return; };
 
@@ -1758,6 +1769,8 @@ fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut A
                     }
                     InputPurpose::ContentFilter => {
                         state.content_filter = input.buffer.clone();
+                        state.content_filter_lc = state.content_filter.to_lowercase();
+                        rebuild_content_matches(state);
                         state.detail_files_state.select(Some(0));
                     }
                 }
@@ -1775,6 +1788,8 @@ fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut A
                     }
                     InputPurpose::ContentFilter => {
                         state.content_filter = input.buffer.clone();
+                        state.content_filter_lc = state.content_filter.to_lowercase();
+                        rebuild_content_matches(state);
                         state.detail_files_state.select(Some(0));
                     }
                 }
@@ -1989,13 +2004,13 @@ fn mouse_scroll(column: u16, row: u16, state: &mut AppState, delta: isize) {
     } else if (rect_contains(state.detail_rect, column, row)) {
         match state.detail_tab {
             DetailTab::Content => {
-                let count = state.detail.as_ref().map(|detail| {
-                    if state.content_filter.is_empty() {
-                        build_tree_rows(detail, &state.collapsed_folders).len()
-                    } else {
-                        filter_content_rows(detail, &state.content_filter).len()
-                    }
-                }).unwrap_or(0);
+                let count = if state.content_filter.is_empty() {
+                    state.detail.as_ref()
+                        .map(|detail| build_tree_rows(detail, &state.collapsed_folders).len())
+                        .unwrap_or(0)
+                } else {
+                    state.content_filter_matches.len()
+                };
                 move_table(&mut state.detail_files_state, count, delta);
             }
             DetailTab::Peers => {
@@ -2061,13 +2076,42 @@ fn poll_detail(state: &mut AppState) {
     state.last_detail_poll = Instant::now();
     let Some(index) = state.selected_torrent_index() else {
         state.detail = None;
+        state.detail_paths_lc.clear();
+        state.content_filter_matches.clear();
         return;
     };
     match client::send(Request::Info { index }) {
-        Ok(Response::TorrentDetail(detail)) => state.detail = Some(*detail),
+        Ok(Response::TorrentDetail(detail)) => {
+            state.detail = Some(*detail);
+            rebuild_detail_cache(state);
+        }
         Ok(_) => {}
         Err(_) => {}
     }
+}
+
+/// rebuild detail_paths_lc from the current detail, then recompute
+/// content_filter_matches if a filter is active. call whenever detail
+/// or content_filter changes.
+fn rebuild_detail_cache(state: &mut AppState) {
+    state.detail_paths_lc = state.detail.as_ref()
+        .map(|detail| detail.files.iter().map(|file| file.path.to_lowercase()).collect())
+        .unwrap_or_default();
+    rebuild_content_matches(state);
+}
+
+/// recompute content_filter_matches from the precomputed lowercase paths.
+/// O(n * m) with zero allocations: paths are already lowercase, needle
+/// is lowercased once into content_filter_lc.
+fn rebuild_content_matches(state: &mut AppState) {
+    if state.content_filter.is_empty() {
+        state.content_filter_matches.clear();
+        return;
+    }
+    state.content_filter_matches = state.detail_paths_lc.iter().enumerate()
+        .filter(|(_, path_lc)| fuzzy_match_lc(path_lc, &state.content_filter_lc))
+        .map(|(i, _)| i)
+        .collect();
 }
 
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
@@ -2631,15 +2675,12 @@ struct TreeRow {
     is_mixed: bool,
 }
 
-/// fuzzy match: true if needle is empty, needle is a substring of haystack,
-/// OR all characters of needle appear in haystack in order (case-insensitive).
-/// the substring check runs first as a fast path since it's the common case.
-fn fuzzy_match(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() { return true; }
-    // both paths use the same lowercased copies so we only allocate once
-    let haystack_lc = haystack.to_lowercase();
-    let needle_lc = needle.to_lowercase();
-    if haystack_lc.contains(&needle_lc) { return true; }
+/// zero-alloc fuzzy match on pre-lowercased inputs: true if needle_lc is a
+/// substring of haystack_lc OR all characters of needle_lc appear in
+/// haystack_lc in order. substring check runs first as a fast path.
+fn fuzzy_match_lc(haystack_lc: &str, needle_lc: &str) -> bool {
+    if needle_lc.is_empty() { return true; }
+    if haystack_lc.contains(needle_lc) { return true; }
     let mut needle_chars = needle_lc.chars();
     let mut current = needle_chars.next();
     for ch in haystack_lc.chars() {
@@ -2651,27 +2692,24 @@ fn fuzzy_match(haystack: &str, needle: &str) -> bool {
     false
 }
 
-/// flat list of file rows whose paths match `filter`. used instead of
-/// build_tree_rows when a content filter is active. folders are omitted so
-/// matching files are always immediately visible without expanding.
-fn filter_content_rows(detail: &TorrentDetail, filter: &str) -> Vec<TreeRow> {
-    detail.files.iter().enumerate()
-        .filter(|(_, file)| fuzzy_match(&file.path, filter))
-        .map(|(file_index, file)| {
-            let total_done = (file.size as f64 * file.progress as f64) as i64;
-            TreeRow {
-                indent: 0,
-                label: file.path.clone(),
-                full_path: file.path.clone(),
-                is_folder: false,
-                file_index: Some(file_index),
-                total_size: file.size,
-                total_done,
-                priority: Some(file.priority),
-                is_mixed: false,
-            }
-        })
-        .collect()
+/// flat list of file rows for the precomputed match indices. O(k) where k is
+/// the number of matches — no searching, no string lowercasing at draw time.
+fn filter_content_rows(detail: &TorrentDetail, matches: &[usize]) -> Vec<TreeRow> {
+    matches.iter().map(|&file_index| {
+        let file = &detail.files[file_index];
+        let total_done = (file.size as f64 * file.progress as f64) as i64;
+        TreeRow {
+            indent: 0,
+            label: file.path.clone(),
+            full_path: file.path.clone(),
+            is_folder: false,
+            file_index: Some(file_index),
+            total_size: file.size,
+            total_done,
+            priority: Some(file.priority),
+            is_mixed: false,
+        }
+    }).collect()
 }
 
 /// build a tree of files from their flat paths. folders aggregate size +
@@ -2812,7 +2850,7 @@ fn draw_content_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState
     let tree_rows = if state.content_filter.is_empty() {
         build_tree_rows(detail, &state.collapsed_folders)
     } else {
-        filter_content_rows(detail, &state.content_filter)
+        filter_content_rows(detail, &state.content_filter_matches)
     };
 
     let header = Row::new([
