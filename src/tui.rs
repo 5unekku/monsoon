@@ -792,9 +792,7 @@ enum PromptAction {
 }
 
 /// per-torrent add-time options collected by the options form before
-/// dispatch. mirrors qbittorrent's add-torrent dialog. first_last and
-/// subfolder are surfaced in the UI but not yet wired to libtorrent —
-/// they're carried so the rest of the form can be designed around them.
+/// dispatch. mirrors qbittorrent's add-torrent dialog.
 #[derive(Clone)]
 struct AddOptions {
     start: bool,
@@ -1476,18 +1474,17 @@ fn toggle_sequential(state: &mut AppState) {
     }
 }
 
-/// rename the torrent display name. libtorrent does not expose a stable
-/// "set display name" api today, so this is implemented as a server-side
-/// metadata update. for the v1 we just store nothing — the .torrent name
-/// is canonical. surfacing this is a TODO; for now the prompt is a no-op
-/// that explains itself.
 fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
     match &prompt.action {
         PromptAction::Rename => {
-            Err(anyhow::anyhow!(
-                "renaming the torrent name itself is not yet wired. \
-                 use the content tab (e, ]) and r to rename individual files."
-            ))
+            match client::send(Request::RenameTorrent {
+                index: prompt.torrent_index,
+                new_name: prompt.single_line_buffer(),
+            })? {
+                Response::Ok => Ok(()),
+                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
+                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
         }
         PromptAction::RenameFile { file_index } => {
             match client::send(Request::RenameFile {
@@ -1671,8 +1668,8 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
                 paused_entries.push(uri.clone());
             }
         }
-        // first_last and subfolder are surfaced in the UI but not yet wired
-        // to a backend setting — see AddOptions docs.
+        if (options.first_last) { todo!("first/last piece priority") }
+        if (!matches!(options.subfolder, SubfolderMode::Default)) { todo!("subfolder mode") }
     }
     if (failures.is_empty()) {
         state.error = Some(format!("added {} torrent(s)", succeeded));
@@ -1827,6 +1824,12 @@ fn collapse_focused(state: &mut AppState, collapse: bool) {
 fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Tab, _) => {
+            let purpose = state.active_input.as_ref().map(|i| i.purpose);
+            if purpose == Some(InputPurpose::ContentFilter) {
+                tab_complete_content_filter(state);
+            }
+        }
         (KeyCode::Esc, _) => {
             // cancel: revert filter to its previous committed value
             if let Some(input) = state.active_input.take() {
@@ -2355,6 +2358,43 @@ fn rebuild_content_matches(state: &mut AppState) {
         .collect();
 }
 
+// expand the content filter buffer to the longest common prefix of all
+// currently matching paths. case-insensitive comparison, case from first match.
+fn tab_complete_content_filter(state: &mut AppState) {
+    if state.content_filter_matches.is_empty() { return; }
+    let paths: Vec<String> = {
+        let Some(detail) = &state.detail else { return; };
+        state.content_filter_matches.iter()
+            .map(|&i| detail.files[i].path.clone())
+            .collect()
+    };
+    let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    let prefix = longest_common_prefix_ci(&path_refs);
+    if prefix.chars().count() > state.content_filter.chars().count() {
+        state.content_filter = prefix;
+        state.content_filter_lc = state.content_filter.to_lowercase();
+        if let Some(input) = state.active_input.as_mut() {
+            input.buffer = state.content_filter.clone();
+        }
+        rebuild_content_matches(state);
+        state.detail_files_state.select(Some(0));
+    }
+}
+
+fn longest_common_prefix_ci(paths: &[&str]) -> String {
+    let Some(first) = paths.first() else { return String::new(); };
+    let first_chars: Vec<char> = first.chars().collect();
+    let mut common = first_chars.len();
+    for path in &paths[1..] {
+        let count = first_chars.iter().zip(path.chars())
+            .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+            .count();
+        common = common.min(count);
+        if common == 0 { break; }
+    }
+    first_chars[..common].iter().collect()
+}
+
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.priority_step.is_some()) {
         draw_priority_step(frame, state);
@@ -2561,8 +2601,8 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
     let rows = [
         ("start",          format_bool(options.start)),
         ("sequential",     format_bool(options.sequential)),
-        ("first/last",     format!("{}  (not yet wired)", format_bool(options.first_last))),
-        ("create subfolder", format!("{}  (not yet wired)", options.subfolder.label())),
+        ("first/last",     format_bool(options.first_last).to_string()),
+        ("create subfolder", options.subfolder.label().to_string()),
         ("download path",  path_display),
     ];
     let lines: Vec<Line> = rows.iter().enumerate().map(|(index, (label, value))| {

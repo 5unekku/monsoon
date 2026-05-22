@@ -131,6 +131,9 @@ pub enum Request {
     SetCategoryDefinition { name: String, save_path: String, add_tags: Vec<String> },
     /// remove a category. torrents previously in it keep their save_path.
     RemoveCategory { name: String },
+    /// set a custom display name for a torrent. stored server-side and used
+    /// in place of the libtorrent name in all responses. empty string clears it.
+    RenameTorrent { index: usize, new_name: String },
     /// pin a torrent's outgoing connections to a specific network interface.
     /// `None` clears the per-torrent override.
     SetTorrentInterface { index: usize, interface: Option<String> },

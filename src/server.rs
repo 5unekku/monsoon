@@ -28,6 +28,8 @@ struct ManagedTorrent {
     category: Option<String>,
     /// per-torrent network interface override (e.g. "tun0"). None = use session default.
     interface_override: Option<String>,
+    /// custom display name set by the user. overrides the libtorrent name in responses.
+    display_name: Option<String>,
     /// set when the torrent first transitions to "finished" so
     /// completion_script does not fire twice
     was_finished: bool,
@@ -46,6 +48,8 @@ struct TorrentRecord {
     category: Option<String>,
     #[serde(default)]
     interface_override: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
 }
 
 pub struct App {
@@ -104,6 +108,7 @@ impl App {
                         tags: record.tags,
                         category: record.category,
                         interface_override: record.interface_override,
+                        display_name: record.display_name,
                         was_finished: false,
                     });
                 }
@@ -122,6 +127,7 @@ impl App {
             tags: torrent.tags.clone(),
             category: torrent.category.clone(),
             interface_override: torrent.interface_override.clone(),
+            display_name: torrent.display_name.clone(),
         }).collect();
         if let Ok(list_path) = Config::torrent_list_path() {
             if let Ok(json) = serde_json::to_string(&records) {
@@ -183,6 +189,7 @@ impl App {
             tags,
             category: category.map(str::to_string),
             interface_override: None,
+            display_name: None,
             was_finished: false,
         });
         self.persist_torrent_list();
@@ -224,6 +231,7 @@ impl App {
             tags,
             category: category.map(str::to_string),
             interface_override: None,
+            display_name: None,
             was_finished: false,
         });
         self.persist_torrent_list();
@@ -855,6 +863,16 @@ impl App {
                 let count = self.retag_all();
                 Response::Config(format!("retagged {} torrent(s)\n", count))
             }
+            Request::RenameTorrent { index, new_name } => {
+                match self.torrents.get_mut(index) {
+                    None => Response::Err(format!("invalid index: {}", index)),
+                    Some(torrent) => {
+                        torrent.display_name = if new_name.is_empty() { None } else { Some(new_name) };
+                        self.persist_torrent_list();
+                        Response::Ok
+                    }
+                }
+            }
             Request::SetTorrentInterface { index, interface } => {
                 match self.torrents.get_mut(index) {
                     None => Response::Err(format!("invalid index: {}", index)),
@@ -896,7 +914,7 @@ fn status_to_info(index: usize, torrent: &ManagedTorrent) -> TorrentInfo {
     TorrentInfo {
         index,
         info_hash: status.info_hash,
-        name: status.name,
+        name: torrent.display_name.clone().unwrap_or(status.name),
         state: status.state,
         progress: status.progress,
         download_rate: status.download_rate,
