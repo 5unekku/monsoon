@@ -1356,9 +1356,6 @@ pub fn run(quiet: bool) -> Result<()> {
 
     let mut app = App::new(config.clone()).context("create session")?;
     app.install_ip_filter();
-    if let Err(error) = app.load_torrents() {
-        tracing::warn!("could not restore saved torrents: {}", error);
-    }
 
     let listener = UnixListener::bind(&socket_path).context("bind socket")?;
     listener.set_nonblocking(true).context("set nonblocking")?;
@@ -1373,9 +1370,13 @@ pub fn run(quiet: bool) -> Result<()> {
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))?;
 
-    // sd_notify if launched under systemd with Type=notify. silent when
-    // NOTIFY_SOCKET isn't set, so this is safe everywhere.
+    // socket is up and pidfile is written — tell systemd we're ready now so
+    // startup doesn't block on torrent loading. resume data loads below.
     notify_systemd_ready();
+
+    if let Err(error) = app.load_torrents() {
+        tracing::warn!("could not restore saved torrents: {}", error);
+    }
 
     tracing::info!(
         socket = %socket_path.display(),

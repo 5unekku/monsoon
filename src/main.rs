@@ -360,8 +360,13 @@ fn send_sigterm_to_daemon() -> Result<()> {
     if (libc_kill(pid, 15) != 0) {
         anyhow::bail!("kill {}: {}", pid, std::io::Error::last_os_error());
     }
-    println!("SIGTERM sent to {}", pid);
-    Ok(())
+    // wait for the process to exit so callers (service scripts) don't race
+    // against write_pidfile() seeing it still alive
+    for _ in 0..300 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if (libc_kill(pid, 0) != 0) { return Ok(()); }
+    }
+    anyhow::bail!("daemon (pid {}) did not exit within 30s", pid)
 }
 
 // signal 0 is a no-op probe (does the pid exist?); 15 is SIGTERM.
