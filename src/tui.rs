@@ -744,6 +744,9 @@ enum InputPurpose {
     /// case-insensitive substring filter over torrent names. submits as you
     /// type — enter just closes the input bar.
     ListFilter,
+    /// fuzzy filter over file paths in the content tab. live-updates as you
+    /// type; switches draw_content_tab to a flat filtered list.
+    ContentFilter,
 }
 
 /// modal prompt overlay that floats on top of the main view. captures all input
@@ -860,6 +863,8 @@ struct AppState {
     /// last filter substring that was applied to the torrent list, kept after
     /// the input bar closes so the user can re-open it and edit
     name_filter: String,
+    /// fuzzy filter over file paths in the content tab. empty = tree view.
+    content_filter: String,
     torrents: Vec<TorrentInfo>,
     stats: Option<StatsInfo>,
     detail: Option<TorrentDetail>,
@@ -952,6 +957,7 @@ impl AppState {
             add_options: None,
             active_input: None,
             name_filter: String::new(),
+            content_filter: String::new(),
             torrents: Vec::new(),
             stats: None,
             detail: None,
@@ -1025,7 +1031,13 @@ impl AppState {
             Pane::Detail => match self.detail_tab {
                 DetailTab::Content => {
                     let count = self.detail.as_ref()
-                        .map(|detail| build_tree_rows(detail, &self.collapsed_folders).len())
+                        .map(|detail| {
+                            if self.content_filter.is_empty() {
+                                build_tree_rows(detail, &self.collapsed_folders).len()
+                            } else {
+                                filter_content_rows(detail, &self.content_filter).len()
+                            }
+                        })
                         .unwrap_or(0);
                     move_table(&mut self.detail_files_state, count, delta);
                 }
@@ -1204,19 +1216,31 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
             };
             set_focused_priority(state, priority);
         }
-        // open the torrent-list name filter. takes over keyboard input via
-        // active_input so letters typed into the filter don't trigger
-        // sidebar/detail/pause/etc. bindings.
-        (KeyCode::Char('/'), KeyModifiers::NONE) => {
+        // open the context-appropriate search bar. routes to torrent filter
+        // (list pane), file filter (content tab), or no-op (sidebar).
+        (KeyCode::Char('/'), KeyModifiers::NONE) => open_search(state),
+
+        _ => {}
+    }
+    false
+}
+
+fn open_search(state: &mut AppState) {
+    match state.focus {
+        Pane::Sidebar => {}  // not wired yet
+        Pane::Detail if state.detail_tab == DetailTab::Content => {
+            state.active_input = Some(TextInput {
+                purpose: InputPurpose::ContentFilter,
+                buffer: state.content_filter.clone(),
+            });
+        }
+        _ => {
             state.active_input = Some(TextInput {
                 purpose: InputPurpose::ListFilter,
                 buffer: state.name_filter.clone(),
             });
         }
-
-        _ => {}
     }
-    false
 }
 
 fn open_rename_prompt(state: &mut AppState) {
@@ -1265,7 +1289,11 @@ fn open_content_rename_prompt(state: &mut AppState) {
         state.error = Some("file list not loaded".to_string());
         return;
     };
-    let rows = build_tree_rows(detail, &state.collapsed_folders);
+    let rows = if state.content_filter.is_empty() {
+        build_tree_rows(detail, &state.collapsed_folders)
+    } else {
+        filter_content_rows(detail, &state.content_filter)
+    };
     let Some(row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else {
         state.error = Some("no file selected".to_string());
         return;
@@ -1525,6 +1553,7 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
             uri: uri.clone(),
             save_path,
             category: None,
+            start_paused: !options.start,
         }) {
             Ok(Response::Added { id }) => Some(id),
             Ok(Response::Err(message)) => { failures.push(format!("{}: {}", uri, message)); None }
@@ -1533,18 +1562,13 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         };
         if (added_id.is_none()) { continue; }
         succeeded += 1;
-        // the newly-added torrent occupies the highest index in the daemon's
-        // torrent vector; refresh the list so we can target it for follow-up
-        // adjustments. a roundtrip per add keeps the indexing simple.
-        let new_index = match client::send(Request::List) {
-            Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
-            _ => continue,
-        };
         if (options.sequential) {
+            // only do the List roundtrip when we actually need the new index
+            let new_index = match client::send(Request::List) {
+                Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
+                _ => continue,
+            };
             let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
-        }
-        if (!options.start) {
-            let _ = client::send(Request::Pause { index: new_index });
         }
         // first_last and subfolder are surfaced in the UI but not yet wired
         // to a backend setting — see AddOptions docs.
@@ -1638,7 +1662,11 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
 fn set_focused_priority(state: &mut AppState, priority: u8) {
     let Some(torrent_index) = state.selected_torrent_index() else { return; };
     let Some(detail) = &state.detail else { return; };
-    let rows = build_tree_rows(detail, &state.collapsed_folders);
+    let rows = if state.content_filter.is_empty() {
+        build_tree_rows(detail, &state.collapsed_folders)
+    } else {
+        filter_content_rows(detail, &state.content_filter)
+    };
     let Some(selected_row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else { return; };
 
     // collect target file indices. for a leaf row, that's just file_index.
@@ -1680,6 +1708,8 @@ fn collapse_focused(state: &mut AppState, collapse: bool) {
     if (state.focus != Pane::Detail || state.detail_tab != DetailTab::Content) {
         return;
     }
+    // in filter mode there's no tree structure to collapse
+    if (!state.content_filter.is_empty()) { return; }
     let Some(detail) = &state.detail else { return; };
     let rows = build_tree_rows(detail, &state.collapsed_folders);
     let Some(row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else { return; };
@@ -1714,16 +1744,21 @@ fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut A
         (KeyCode::Backspace, _) => {
             if let Some(input) = state.active_input.as_mut() {
                 input.buffer.pop();
-                if (input.purpose == InputPurpose::ListFilter) {
-                    state.name_filter = input.buffer.clone();
-                    // keep selection in bounds when the visible set shrinks
-                    let visible = state.filtered_indices().len();
-                    if let Some(selected) = state.table_state.selected() {
-                        if (visible == 0) {
-                            state.table_state.select(None);
-                        } else if (selected >= visible) {
-                            state.table_state.select(Some(visible - 1));
+                match input.purpose {
+                    InputPurpose::ListFilter => {
+                        state.name_filter = input.buffer.clone();
+                        let visible = state.filtered_indices().len();
+                        if let Some(selected) = state.table_state.selected() {
+                            if (visible == 0) {
+                                state.table_state.select(None);
+                            } else if (selected >= visible) {
+                                state.table_state.select(Some(visible - 1));
+                            }
                         }
+                    }
+                    InputPurpose::ContentFilter => {
+                        state.content_filter = input.buffer.clone();
+                        state.detail_files_state.select(Some(0));
                     }
                 }
             }
@@ -1734,8 +1769,14 @@ fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut A
         {
             if let Some(input) = state.active_input.as_mut() {
                 input.buffer.push(character);
-                if (input.purpose == InputPurpose::ListFilter) {
-                    state.name_filter = input.buffer.clone();
+                match input.purpose {
+                    InputPurpose::ListFilter => {
+                        state.name_filter = input.buffer.clone();
+                    }
+                    InputPurpose::ContentFilter => {
+                        state.content_filter = input.buffer.clone();
+                        state.detail_files_state.select(Some(0));
+                    }
                 }
             }
         }
@@ -1948,7 +1989,13 @@ fn mouse_scroll(column: u16, row: u16, state: &mut AppState, delta: isize) {
     } else if (rect_contains(state.detail_rect, column, row)) {
         match state.detail_tab {
             DetailTab::Content => {
-                let count = state.detail.as_ref().map(|detail| detail.files.len()).unwrap_or(0);
+                let count = state.detail.as_ref().map(|detail| {
+                    if state.content_filter.is_empty() {
+                        build_tree_rows(detail, &state.collapsed_folders).len()
+                    } else {
+                        filter_content_rows(detail, &state.content_filter).len()
+                    }
+                }).unwrap_or(0);
                 move_table(&mut state.detail_files_state, count, delta);
             }
             DetailTab::Peers => {
@@ -2584,6 +2631,49 @@ struct TreeRow {
     is_mixed: bool,
 }
 
+/// fuzzy match: true if needle is empty, needle is a substring of haystack,
+/// OR all characters of needle appear in haystack in order (case-insensitive).
+/// the substring check runs first as a fast path since it's the common case.
+fn fuzzy_match(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() { return true; }
+    // both paths use the same lowercased copies so we only allocate once
+    let haystack_lc = haystack.to_lowercase();
+    let needle_lc = needle.to_lowercase();
+    if haystack_lc.contains(&needle_lc) { return true; }
+    let mut needle_chars = needle_lc.chars();
+    let mut current = needle_chars.next();
+    for ch in haystack_lc.chars() {
+        if Some(ch) == current {
+            current = needle_chars.next();
+            if current.is_none() { return true; }
+        }
+    }
+    false
+}
+
+/// flat list of file rows whose paths match `filter`. used instead of
+/// build_tree_rows when a content filter is active. folders are omitted so
+/// matching files are always immediately visible without expanding.
+fn filter_content_rows(detail: &TorrentDetail, filter: &str) -> Vec<TreeRow> {
+    detail.files.iter().enumerate()
+        .filter(|(_, file)| fuzzy_match(&file.path, filter))
+        .map(|(file_index, file)| {
+            let total_done = (file.size as f64 * file.progress as f64) as i64;
+            TreeRow {
+                indent: 0,
+                label: file.path.clone(),
+                full_path: file.path.clone(),
+                is_folder: false,
+                file_index: Some(file_index),
+                total_size: file.size,
+                total_done,
+                priority: Some(file.priority),
+                is_mixed: false,
+            }
+        })
+        .collect()
+}
+
 /// build a tree of files from their flat paths. folders aggregate size +
 /// progress from their children so the listing reads at a glance.
 fn build_tree_rows(detail: &TorrentDetail, collapsed: &std::collections::BTreeSet<String>) -> Vec<TreeRow> {
@@ -2719,7 +2809,11 @@ fn draw_content_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState
         return;
     }
 
-    let tree_rows = build_tree_rows(detail, &state.collapsed_folders);
+    let tree_rows = if state.content_filter.is_empty() {
+        build_tree_rows(detail, &state.collapsed_folders)
+    } else {
+        filter_content_rows(detail, &state.content_filter)
+    };
 
     let header = Row::new([
         Cell::from("name").style(Style::default().add_modifier(Modifier::BOLD)),
@@ -2891,6 +2985,7 @@ fn draw_input_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     let Some(input) = &state.active_input else { return; };
     let prefix = match input.purpose {
         InputPurpose::ListFilter => "/",
+        InputPurpose::ContentFilter => "files",
     };
     let line = Line::from(vec![
         Span::styled(format!(" {} ", prefix), Style::default().fg(Color::Black).bg(Color::Yellow)),

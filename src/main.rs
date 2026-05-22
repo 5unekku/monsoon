@@ -383,7 +383,7 @@ fn command_to_request(command: Commands) -> Request {
     match command {
         Commands::List => Request::List,
         Commands::Info { index } => Request::Info { index },
-        Commands::Add { uri, save_path, category } => Request::Add { uri, save_path, category },
+        Commands::Add { uri, save_path, category } => Request::Add { uri, save_path, category, start_paused: false },
         Commands::Remove { index, delete_files } => Request::Remove { index, delete_files },
         Commands::Pause { index } => Request::Pause { index },
         Commands::Resume { index } => Request::Resume { index },

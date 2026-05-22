@@ -161,9 +161,11 @@ impl App {
         uri: &str,
         save_path: Option<&str>,
         category: Option<&str>,
+        start_paused: bool,
     ) -> Result<String> {
         let (save_path, mut tags) = self.resolve_add_target(save_path, category);
         let handle = self.session.add_torrent_magnet(uri, &save_path, None)?;
+        if start_paused { handle.pause(); }
         let info_hash = handle.info_hash();
         // evaluate auto-tag rules against whatever we know now (name from
         // status, no trackers yet for magnets). retagging happens later on
@@ -192,12 +194,22 @@ impl App {
         file_path: &str,
         save_path: Option<&str>,
         category: Option<&str>,
+        start_paused: bool,
     ) -> Result<String> {
         if (!std::path::Path::new(file_path).exists()) {
             return Err(anyhow::anyhow!("file not found: {}", file_path));
         }
         let (save_path, mut tags) = self.resolve_add_target(save_path, category);
         let handle = self.session.add_torrent_file(file_path, &save_path, None)?;
+        if start_paused {
+            handle.pause();
+            // .torrent files have metadata immediately — reset any priority-0 files to normal
+            // so the user can cherry-pick without needing to un-skip everything first.
+            let priorities = handle.file_priorities();
+            for (i, priority) in priorities.iter().enumerate() {
+                if *priority == 0 { handle.set_file_priority(i as i32, 4); }
+            }
+        }
         let info_hash = handle.info_hash();
         let status = handle.status();
         let trackers = handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
@@ -594,7 +606,7 @@ impl App {
                     if (name.contains(".loaded.")) { continue; }
                 }
                 let path_string = entry_path.to_string_lossy().to_string();
-                match self.add_file(&path_string, None, None) {
+                match self.add_file(&path_string, None, None, false) {
                     Ok(hash) => {
                         tracing::info!(file = %path_string, hash, "watch: added");
                         // rename to *.loaded.torrent
@@ -683,18 +695,18 @@ impl App {
                     }
                 }
             }
-            Request::Add { uri, save_path, category } => {
+            Request::Add { uri, save_path, category, start_paused } => {
                 // delegate scheme + path resolution to the sources module so
                 // http/https/ftp/sftp urls and ~ expansion work uniformly.
                 match crate::sources::resolve(&uri) {
                     Ok(crate::sources::Source::Magnet(magnet)) => {
-                        match self.add_magnet(&magnet, save_path.as_deref(), category.as_deref()) {
+                        match self.add_magnet(&magnet, save_path.as_deref(), category.as_deref(), start_paused) {
                             Ok(hash) => Response::Added { id: hash },
                             Err(error) => Response::Err(error.to_string()),
                         }
                     }
                     Ok(crate::sources::Source::File(path)) => {
-                        match self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref()) {
+                        match self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref(), start_paused) {
                             Ok(hash) => Response::Added { id: hash },
                             Err(error) => Response::Err(error.to_string()),
                         }

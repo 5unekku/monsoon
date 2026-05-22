@@ -92,7 +92,7 @@ pub struct TorrentDetail {
 pub enum Request {
     List,
     Info { index: usize },
-    Add { uri: String, save_path: Option<String>, category: Option<String> },
+    Add { uri: String, save_path: Option<String>, category: Option<String>, start_paused: bool },
     Remove { index: usize, delete_files: bool },
     Pause { index: usize },
     Resume { index: usize },
