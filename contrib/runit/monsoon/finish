@@ -1,0 +1,5 @@
+#!/bin/sh
+# called by runit when the service exits.
+# $1 = exit code of run, $2 = signal number (or -1 if exited normally)
+
+# nothing to do — monsoon cleans up its own socket and pidfile on shutdown.

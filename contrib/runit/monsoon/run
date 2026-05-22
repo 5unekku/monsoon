@@ -1,0 +1,9 @@
+#!/bin/sh
+# user service — link to your runsvdir:
+#   ln -s /path/to/contrib/runit/monsoon ~/.config/sv/monsoon
+#   sv up monsoon
+
+# kill any daemon already running (e.g. auto-spawned by tui) before taking over.
+monsoon kill 2>/dev/null || true
+
+exec monsoon daemon

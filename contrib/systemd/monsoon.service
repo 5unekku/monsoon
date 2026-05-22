@@ -1,0 +1,32 @@
+# user service — install to ~/.config/systemd/user/monsoon.service
+# then: systemctl --user daemon-reload
+#       systemctl --user enable --now monsoon
+#
+# to survive across logouts (run from boot without an active session):
+#   loginctl enable-linger $USER
+
+[Unit]
+Description=monsoon torrent daemon
+Documentation=https://codeberg.org/5unekku/monsoon
+After=network.target
+
+[Service]
+Type=notify
+NotifyAccess=main
+# monsoon must be on the PATH inherited from your PAM session.
+# if it isn't (e.g. cargo install), run once in your shell:
+#   systemctl --user set-environment PATH="$PATH"
+# kill any daemon already running (e.g. auto-spawned by tui) before taking over.
+# the - prefix ignores failure when no daemon is running.
+ExecStartPre=-monsoon kill
+ExecStart=monsoon daemon
+Restart=on-failure
+RestartSec=5
+# give the daemon time to flush resume data and drain libtorrent alerts on stop.
+# default 90s is usually fine, but explicit avoids a premature SIGKILL.
+TimeoutStopSec=30
+# SIGTERM the main process only; lets completion hook subprocesses finish naturally.
+KillMode=mixed
+
+[Install]
+WantedBy=default.target
