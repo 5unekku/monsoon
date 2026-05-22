@@ -851,11 +851,87 @@ struct AddOptionsForm {
     edit_buffer: Option<String>,
 }
 
+/// post-add file priority configuration step. appears after adding paused
+/// torrents so the user can cherry-pick files before any data downloads.
+/// one torrent at a time; tab/enter advances, esc skips.
+struct PriorityStep {
+    entries: Vec<String>,   // source URIs (for display), parallel to indices
+    indices: Vec<usize>,    // torrent indices in the daemon's list
+    current: usize,
+    detail: Option<TorrentDetail>,
+    /// lowercased file paths, rebuilt on each detail poll
+    paths_lc: Vec<String>,
+    files_state: TableState,
+    filter: String,
+    filter_lc: String,
+    filter_matches: Vec<usize>,
+    collapsed_folders: std::collections::BTreeSet<String>,
+    last_poll: Instant,
+    filter_active: bool,
+}
+
+impl PriorityStep {
+    fn new(entries: Vec<String>, indices: Vec<usize>) -> Self {
+        let mut files_state = TableState::default();
+        files_state.select(Some(0));
+        Self {
+            entries,
+            indices,
+            current: 0,
+            detail: None,
+            paths_lc: Vec::new(),
+            files_state,
+            filter: String::new(),
+            filter_lc: String::new(),
+            filter_matches: Vec::new(),
+            collapsed_folders: std::collections::BTreeSet::new(),
+            last_poll: Instant::now() - DETAIL_POLL_INTERVAL,
+            filter_active: false,
+        }
+    }
+
+    fn torrent_index(&self) -> Option<usize> {
+        self.indices.get(self.current).copied()
+    }
+
+    fn row_count(&self) -> usize {
+        if self.filter.is_empty() {
+            self.detail.as_ref()
+                .map(|detail| build_tree_rows(detail, &self.collapsed_folders).len())
+                .unwrap_or(0)
+        } else {
+            self.filter_matches.len()
+        }
+    }
+
+    fn current_rows(&self) -> Vec<TreeRow> {
+        let Some(detail) = &self.detail else { return Vec::new(); };
+        if self.filter.is_empty() {
+            build_tree_rows(detail, &self.collapsed_folders)
+        } else {
+            filter_content_rows(detail, &self.filter_matches)
+        }
+    }
+
+    fn rebuild_filter_matches(&mut self) {
+        if self.filter.is_empty() {
+            self.filter_matches.clear();
+            return;
+        }
+        self.filter_matches = self.paths_lc.iter().enumerate()
+            .filter(|(_, path_lc)| fuzzy_match_lc(path_lc, &self.filter_lc))
+            .map(|(i, _)| i)
+            .collect();
+    }
+}
+
 struct AppState {
     mode: Mode,
     prompt: Option<Prompt>,
     /// add-options form opened after the multi-line add prompt is confirmed
     add_options: Option<AddOptionsForm>,
+    /// post-add file priority step. opened when torrents are added paused.
+    priority_step: Option<Box<PriorityStep>>,
     /// inline text field active in the main view. when Some, the main-view
     /// key handler is bypassed and every printable keystroke goes into the
     /// buffer. see [TextInput] for the rationale.
@@ -965,6 +1041,7 @@ impl AppState {
             mode: Mode::Main,
             prompt: None,
             add_options: None,
+            priority_step: None,
             active_input: None,
             name_filter: String::new(),
             content_filter: String::new(),
@@ -1109,6 +1186,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                 poll_detail(&mut state);
             }
         }
+        if (state.priority_step.is_some()) {
+            poll_priority_step(&mut state);
+        }
 
         terminal.draw(|frame| draw(frame, &mut state))?;
 
@@ -1118,7 +1198,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     // input-routing ladder. each level captures input wholesale —
                     // letters bound in the main view don't reach handle_key while
                     // a higher level is active.
-                    let exit = if (state.column_picker.is_some()) {
+                    let exit = if (state.priority_step.is_some()) {
+                        handle_priority_step_key(key.code, key.modifiers, &mut state)
+                    } else if (state.column_picker.is_some()) {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_options.is_some()) {
                         handle_add_options_key(key.code, key.modifiers, &mut state)
@@ -1557,6 +1639,8 @@ fn advance_add_options(state: &mut AppState) {
 fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
     let mut succeeded: usize = 0;
     let mut failures: Vec<String> = Vec::new();
+    let mut paused_indices: Vec<usize> = Vec::new();
+    let mut paused_entries: Vec<String> = Vec::new();
     for (entry_index, uri) in form.entries.iter().enumerate() {
         let options = &form.options[entry_index];
         let save_path = if (options.save_path.trim().is_empty()) { None } else { Some(options.save_path.clone()) };
@@ -1573,13 +1657,19 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         };
         if (added_id.is_none()) { continue; }
         succeeded += 1;
-        if (options.sequential) {
-            // only do the List roundtrip when we actually need the new index
+        // do the List roundtrip whenever we need the new index (sequential or paused)
+        if (options.sequential || !options.start) {
             let new_index = match client::send(Request::List) {
                 Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
                 _ => continue,
             };
-            let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
+            if (options.sequential) {
+                let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
+            }
+            if (!options.start) {
+                paused_indices.push(new_index);
+                paused_entries.push(uri.clone());
+            }
         }
         // first_last and subfolder are surfaced in the UI but not yet wired
         // to a backend setting — see AddOptions docs.
@@ -1595,6 +1685,9 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         ));
     }
     state.last_poll = Instant::now() - POLL_INTERVAL;
+    if (!paused_indices.is_empty()) {
+        state.priority_step = Some(Box::new(PriorityStep::new(paused_entries, paused_indices)));
+    }
 }
 
 fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
@@ -1697,21 +1790,16 @@ fn set_focused_priority(state: &mut AppState, priority: u8) {
     };
 
     if (targets.is_empty()) { return; }
-    let mut failures: Vec<String> = Vec::new();
-    for file_index in &targets {
-        match client::send(Request::SetFilePriority { index: torrent_index, file_index: *file_index, priority }) {
-            Ok(Response::Ok) => {}
-            Ok(Response::Err(message)) => failures.push(format!("#{}: {}", file_index, message)),
-            Ok(_) => failures.push(format!("#{}: unexpected response", file_index)),
-            Err(error) => failures.push(format!("#{}: {}", file_index, error)),
+    let priorities: Vec<(usize, u8)> = targets.iter().map(|&file_index| (file_index, priority)).collect();
+    let count = priorities.len();
+    match client::send(Request::SetFilePrioritiesBatch { index: torrent_index, priorities }) {
+        Ok(Response::Ok) => {
+            state.error = Some(format!("priority {} set on {} file(s)", priority, count));
         }
+        Ok(Response::Err(message)) => state.error = Some(format!("priority: {}", message)),
+        Ok(_) => state.error = Some("unexpected response to batch priority".to_string()),
+        Err(error) => state.error = Some(format!("priority: {}", error)),
     }
-    if (failures.is_empty()) {
-        state.error = Some(format!("priority set to {} on {} file(s)", priority, targets.len()));
-    } else {
-        state.error = Some(format!("priority partial: {}", failures.join("; ")));
-    }
-    // refresh detail so the new priorities show up on the next draw
     state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
 }
 
@@ -2090,6 +2178,159 @@ fn poll_detail(state: &mut AppState) {
     }
 }
 
+fn poll_priority_step(state: &mut AppState) {
+    let Some(step) = state.priority_step.as_mut() else { return; };
+    if (step.last_poll.elapsed() < DETAIL_POLL_INTERVAL) { return; }
+    step.last_poll = Instant::now();
+    let Some(torrent_index) = step.torrent_index() else { return; };
+    match client::send(Request::Info { index: torrent_index }) {
+        Ok(Response::TorrentDetail(detail)) => {
+            let detail = *detail;
+            step.paths_lc = detail.files.iter().map(|file| file.path.to_lowercase()).collect();
+            step.detail = Some(detail);
+            step.rebuild_filter_matches();
+        }
+        _ => {}
+    }
+}
+
+/// advance to the next torrent in the priority step, or close it when done.
+fn advance_priority_step(state: &mut AppState) {
+    let Some(step) = state.priority_step.as_mut() else { return; };
+    if (step.current + 1 < step.indices.len()) {
+        step.current += 1;
+        let mut files_state = TableState::default();
+        files_state.select(Some(0));
+        step.files_state = files_state;
+        step.detail = None;
+        step.paths_lc.clear();
+        step.filter_matches.clear();
+        step.filter.clear();
+        step.filter_lc.clear();
+        step.collapsed_folders.clear();
+        step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+        step.filter_active = false;
+    } else {
+        state.priority_step = None;
+        state.last_poll = Instant::now() - POLL_INTERVAL;
+        state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+    }
+}
+
+fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    // filter-input mode — handle before the navigation block so esc closes
+    // the filter rather than skipping the torrent
+    {
+        let Some(step) = state.priority_step.as_mut() else { return false; };
+        if step.filter_active {
+            match (code, modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+                (KeyCode::Esc, _) | (KeyCode::Enter, _) => step.filter_active = false,
+                (KeyCode::Backspace, _) => {
+                    step.filter.pop();
+                    step.filter_lc = step.filter.to_lowercase();
+                    step.rebuild_filter_matches();
+                    step.files_state.select(Some(0));
+                }
+                (KeyCode::Char(character), modifiers)
+                    if !modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.contains(KeyModifiers::ALT) =>
+                {
+                    step.filter.push(character);
+                    step.filter_lc = step.filter.to_lowercase();
+                    step.rebuild_filter_matches();
+                    step.files_state.select(Some(0));
+                }
+                _ => {}
+            }
+            return false;
+        }
+    }
+    // navigation mode — advance/skip checked before re-borrowing so borrow
+    // checker doesn't see a live &mut PriorityStep during advance_priority_step
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Tab, _) | (KeyCode::Enter, _) | (KeyCode::Esc, _) => {
+            advance_priority_step(state);
+            return false;
+        }
+        _ => {}
+    }
+    let Some(step) = state.priority_step.as_mut() else { return false; };
+    match (code, modifiers) {
+        (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            let count = step.row_count();
+            move_table(&mut step.files_state, count, 1);
+        }
+        (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            let count = step.row_count();
+            move_table(&mut step.files_state, count, -1);
+        }
+        (KeyCode::PageDown, _) => {
+            let count = step.row_count();
+            move_table(&mut step.files_state, count, 10);
+        }
+        (KeyCode::PageUp, _) => {
+            let count = step.row_count();
+            move_table(&mut step.files_state, count, -10);
+        }
+        (KeyCode::Char('a'), KeyModifiers::NONE) | (KeyCode::Left, _) => {
+            if step.filter.is_empty() {
+                let rows = step.current_rows();
+                if let Some(row) = step.files_state.selected().and_then(|i| rows.get(i)) {
+                    if row.is_folder { step.collapsed_folders.insert(row.full_path.clone()); }
+                }
+            }
+        }
+        (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Right, _) => {
+            if step.filter.is_empty() {
+                let rows = step.current_rows();
+                if let Some(row) = step.files_state.selected().and_then(|i| rows.get(i)) {
+                    if row.is_folder { step.collapsed_folders.remove(&row.full_path); }
+                }
+            }
+        }
+        (KeyCode::Char('/'), KeyModifiers::NONE) => step.filter_active = true,
+        (KeyCode::Char(character), KeyModifiers::NONE)
+            if matches!(character, '0' | '1' | '2' | '3' | '4') =>
+        {
+            let priority = match character {
+                '0' => 0u8, '1' => 1u8, '2' => 4u8, '3' => 6u8, '4' => 7u8,
+                _ => unreachable!(),
+            };
+            set_step_priority(step, priority);
+        }
+        _ => {}
+    }
+    false
+}
+
+/// set priority on the focused row in the priority step — same cascading
+/// folder logic as set_focused_priority, but uses the step's own state.
+fn set_step_priority(step: &mut PriorityStep, priority: u8) {
+    let Some(torrent_index) = step.torrent_index() else { return; };
+    let targets: Vec<usize> = {
+        let Some(detail) = &step.detail else { return; };
+        let rows = step.current_rows();
+        let Some(row) = step.files_state.selected().and_then(|i| rows.get(i)) else { return; };
+        if row.is_folder {
+            let prefix = format!("{}/", row.full_path);
+            detail.files.iter().enumerate()
+                .filter(|(_, file)| file.path == row.full_path || file.path.starts_with(&prefix))
+                .map(|(i, _)| i)
+                .collect()
+        } else if let Some(file_index) = row.file_index {
+            vec![file_index]
+        } else {
+            Vec::new()
+        }
+    };
+    if targets.is_empty() { return; }
+    let priorities = targets.iter().map(|&i| (i, priority)).collect();
+    let _ = client::send(Request::SetFilePrioritiesBatch { index: torrent_index, priorities });
+    step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+}
+
 /// rebuild detail_paths_lc from the current detail, then recompute
 /// content_filter_matches if a filter is active. call whenever detail
 /// or content_filter changes.
@@ -2115,6 +2356,10 @@ fn rebuild_content_matches(state: &mut AppState) {
 }
 
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
+    if (state.priority_step.is_some()) {
+        draw_priority_step(frame, state);
+        return;
+    }
     if (matches!(state.mode, Mode::Settings(_))) {
         draw_settings(frame, state);
     } else {
@@ -2129,6 +2374,136 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.add_options.is_some()) {
         draw_add_options_form(frame, state);
     }
+}
+
+fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
+    let Some(step) = state.priority_step.as_mut() else { return; };
+    let area = frame.area();
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // title bar
+        Constraint::Length(1), // subtitle
+        Constraint::Min(0),    // file table
+        Constraint::Length(1), // filter bar
+        Constraint::Length(1), // hint bar
+    ])
+    .split(area);
+
+    // title
+    let total = step.entries.len();
+    let current_num = step.current + 1;
+    let entry_label = step.entries.get(step.current).cloned().unwrap_or_default();
+    let title = Line::from(vec![
+        Span::styled(" set file priorities ", Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled(
+            format!("torrent {}/{}", current_num, total),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(title), layout[0]);
+
+    // subtitle shows the URI/name being configured
+    let subtitle = Line::from(vec![
+        Span::raw(" "),
+        Span::styled(&entry_label, Style::default().fg(Color::Yellow)),
+    ]);
+    frame.render_widget(Paragraph::new(subtitle), layout[1]);
+
+    // file table
+    if step.detail.is_none() {
+        let waiting = Paragraph::new("waiting for metadata...")
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(waiting, layout[2]);
+    } else {
+        let rows_data = step.current_rows();
+
+        let header = Row::new([
+            Cell::from("name").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("size").style(Style::default().add_modifier(Modifier::BOLD)),
+            Cell::from("priority").style(Style::default().add_modifier(Modifier::BOLD)),
+        ]);
+
+        let rows: Vec<Row> = rows_data.iter().map(|tree_row| {
+            let indent = "  ".repeat(tree_row.indent);
+            let priority_label = if tree_row.is_mixed {
+                "mixed".to_string()
+            } else {
+                match tree_row.priority {
+                    None => "—".to_string(),
+                    Some(0) => "skip".to_string(),
+                    Some(1..=3) => format!("low/{}", tree_row.priority.unwrap()),
+                    Some(4) => "normal".to_string(),
+                    Some(5..=6) => format!("high/{}", tree_row.priority.unwrap()),
+                    Some(7) => "max".to_string(),
+                    Some(other) => other.to_string(),
+                }
+            };
+            let row_style = if tree_row.is_folder {
+                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+            } else if tree_row.priority == Some(0) {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+            };
+            Row::new(vec![
+                Cell::from(format!("{}{}", indent, tree_row.label)),
+                Cell::from(crate::display::format_bytes(tree_row.total_size)),
+                Cell::from(priority_label),
+            ])
+            .style(row_style)
+        }).collect();
+
+        let widths = [
+            Constraint::Min(30),
+            Constraint::Length(10),
+            Constraint::Length(10),
+        ];
+
+        let table = Table::new(rows, widths)
+            .header(header)
+            .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .highlight_symbol("▌ ");
+
+        frame.render_stateful_widget(table, layout[2], &mut step.files_state);
+    }
+
+    // filter bar
+    if step.filter_active {
+        let filter_line = Line::from(vec![
+            Span::styled(" files ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(" "),
+            Span::raw(step.filter.as_str()),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::raw("   "),
+            Span::styled("esc cancel / enter close", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(filter_line), layout[3]);
+    } else if !step.filter.is_empty() {
+        let filter_line = Line::from(vec![
+            Span::styled(" files ", Style::default().fg(Color::Black).bg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(step.filter.as_str(), Style::default().fg(Color::DarkGray)),
+            Span::raw("   "),
+            Span::styled("/ to edit", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(filter_line), layout[3]);
+    } else {
+        let hint = Span::styled(" / to filter files", Style::default().fg(Color::DarkGray));
+        frame.render_widget(Paragraph::new(Line::from(vec![hint])), layout[3]);
+    }
+
+    // hint bar
+    let hint = Line::from(vec![
+        Span::styled(" 0 ", Style::default().fg(Color::Yellow)), Span::raw("skip  "),
+        Span::styled("1 ", Style::default().fg(Color::Yellow)), Span::raw("low  "),
+        Span::styled("2 ", Style::default().fg(Color::Yellow)), Span::raw("normal  "),
+        Span::styled("3 ", Style::default().fg(Color::Yellow)), Span::raw("high  "),
+        Span::styled("4 ", Style::default().fg(Color::Yellow)), Span::raw("max  "),
+        Span::styled("enter/esc ", Style::default().fg(Color::Yellow)),
+        Span::raw(if total > 1 { "next torrent  " } else { "done  " }),
+    ]);
+    frame.render_widget(Paragraph::new(hint), layout[4]);
 }
 
 fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {

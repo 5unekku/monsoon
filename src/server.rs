@@ -782,6 +782,20 @@ impl App {
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
+            Request::SetFilePrioritiesBatch { index, priorities } => {
+                match self.torrents.get(index) {
+                    None => Response::Err(format!("invalid index: {}", index)),
+                    Some(torrent) => {
+                        for (file_index, priority) in &priorities {
+                            if *priority > 7 {
+                                return Response::Err(format!("priority must be 0..=7, got {}", priority));
+                            }
+                            torrent.handle.set_file_priority(*file_index as i32, *priority as i32);
+                        }
+                        Response::Ok
+                    }
+                }
+            }
             Request::Magnet { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
                 Some(torrent) => Response::Magnet(torrent.handle.magnet_uri()),

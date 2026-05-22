@@ -115,6 +115,8 @@ pub enum Request {
     Reannounce { index: usize },
     /// set the download priority for a single file. 0 = skip, 1..=7 = normal..high.
     SetFilePriority { index: usize, file_index: usize, priority: u8 },
+    /// set priorities for many files in one roundtrip. each tuple is (file_index, priority).
+    SetFilePrioritiesBatch { index: usize, priorities: Vec<(usize, u8)> },
     /// build a shareable magnet URI for the active torrent
     Magnet { index: usize },
     /// toggle the sequential-download flag (front-to-back piece order)
