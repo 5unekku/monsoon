@@ -273,9 +273,14 @@ impl App {
     }
 
     fn apply_config_change(&mut self, key: &str, value: &str) -> Result<()> {
-        // libtorrent's apply_settings does not re-bind listen interfaces;
-        // those values only take effect on the next daemon start. surface that.
-        let restart_required = matches!(key, "listen_address" | "listen_port");
+        // these settings only take effect after a daemon restart
+        let restart_required = matches!(
+            key,
+            "listen_address" | "listen_port"
+            | "proxy_type" | "proxy_host" | "proxy_port"
+            | "proxy_username" | "proxy_password"
+            | "proxy_peer_connections" | "proxy_tracker_connections"
+        );
         match key {
             "listen_address" => self.config.listen_address = value.to_string(),
             "listen_port" => self.config.listen_port = value.parse()?,
@@ -305,6 +310,18 @@ impl App {
             "enable_outgoing_utp" | "outgoing_utp" => self.config.enable_outgoing_utp = parse_bool(value),
             "announce_to_all_trackers" => self.config.announce_to_all_trackers = parse_bool(value),
             "announce_to_all_tiers" => self.config.announce_to_all_tiers = parse_bool(value),
+            "proxy_type" => {
+                if (!matches!(value, "none" | "socks4" | "socks5" | "socks5_pw" | "http" | "http_pw" | "i2p")) {
+                    return Err(anyhow::anyhow!("proxy_type must be: none | socks4 | socks5 | socks5_pw | http | http_pw | i2p"));
+                }
+                self.config.proxy_type = value.to_string();
+            }
+            "proxy_host" => self.config.proxy_host = value.to_string(),
+            "proxy_port" => self.config.proxy_port = value.parse()?,
+            "proxy_username" => self.config.proxy_username = value.to_string(),
+            "proxy_password" => self.config.proxy_password = value.to_string(),
+            "proxy_peer_connections" => self.config.proxy_peer_connections = parse_bool(value),
+            "proxy_tracker_connections" => self.config.proxy_tracker_connections = parse_bool(value),
             "max_active_downloads" | "active_downloads" => self.config.max_active_downloads = value.parse()?,
             "max_active_uploads" | "active_uploads" => self.config.max_active_uploads = value.parse()?,
             "max_active_torrents" | "active_limit" => self.config.max_active_torrents = value.parse()?,
