@@ -31,6 +31,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "logg
 rustls-pemfile = "2"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 if-addrs = "0.13"
+curl = "0.4"
 
 [build-dependencies]
 cxx-build = "1.0"

@@ -1,8 +1,8 @@
 //! resolve user-supplied torrent sources (magnet uris, URLs, paths) to
 //! something the daemon can hand to libtorrent. supports:
 //! - magnet:?xt=…                           (passed through)
-//! - http://…, https://…                    (fetched via system curl)
-//! - ftp://…, sftp://…                      (fetched via system curl)
+//! - http://…, https://…                    (fetched via libcurl)
+//! - ftp://…, sftp://…                      (fetched via libcurl)
 //! - /absolute/path/to/x.torrent            (linux/macos)
 //! - C:\path\to\x.torrent                   (windows, case-insensitive)
 //! - ~/foo.torrent or ~user/foo.torrent     (expanded to home dir)
@@ -12,6 +12,7 @@
 //! of by raw ip.
 
 use anyhow::Result;
+use std::io::Write;
 use std::path::PathBuf;
 
 /// enumerate available network interfaces. cross-platform: uses
@@ -79,23 +80,14 @@ pub fn resolve(input: &str) -> Result<Source> {
         return Ok(Source::Magnet(trimmed.to_string()));
     }
 
-    // network protocols — shell out to curl which handles all four protocols
-    // and TLS validation. fall back to a temp file in std::env::temp_dir().
+    // network protocols — fetch via libcurl (http/https/ftp/sftp).
     if (is_url(trimmed)) {
         let temp = std::env::temp_dir().join(format!(
             "monsoon-fetch-{}.torrent",
             std::process::id()
         ));
-        let status = std::process::Command::new("curl")
-            .args(["-fsSL", "--max-time", "120", "-o"])
-            .arg(&temp)
-            .arg(trimmed)
-            .status()
-            .map_err(|error| anyhow::anyhow!("curl: {}", error))?;
-        if (!status.success()) {
-            let _ = std::fs::remove_file(&temp);
-            anyhow::bail!("curl fetch failed (exit {})", status);
-        }
+        fetch_url(&temp, trimmed)
+            .map_err(|error| { let _ = std::fs::remove_file(&temp); error })?;
         return Ok(Source::File(temp));
     }
 
@@ -181,4 +173,32 @@ fn normalise_path(input: &str) -> PathBuf {
         }
     }
     PathBuf::from(input)
+}
+
+/// download a url to a local file via libcurl. follows redirects, enforces a
+/// 120s timeout, and fails with a structured error on non-2xx responses.
+/// supports http, https, ftp, and sftp (same protocols curl supports).
+pub fn fetch_url(dest: &std::path::Path, url: &str) -> Result<()> {
+    use curl::easy::Easy;
+    use std::time::Duration;
+    let file = std::fs::File::create(dest)
+        .map_err(|error| anyhow::anyhow!("create temp file: {}", error))?;
+    let mut file = std::io::BufWriter::new(file);
+    let mut easy = Easy::new();
+    easy.url(url).map_err(|error| anyhow::anyhow!("curl url: {}", error))?;
+    easy.follow_location(true).map_err(|error| anyhow::anyhow!("curl follow_location: {}", error))?;
+    easy.max_redirections(10).map_err(|error| anyhow::anyhow!("curl max_redirections: {}", error))?;
+    easy.connect_timeout(Duration::from_secs(30)).map_err(|error| anyhow::anyhow!("curl connect_timeout: {}", error))?;
+    easy.timeout(Duration::from_secs(120)).map_err(|error| anyhow::anyhow!("curl timeout: {}", error))?;
+    easy.fail_on_error(true).map_err(|error| anyhow::anyhow!("curl fail_on_error: {}", error))?;
+    {
+        let mut transfer = easy.transfer();
+        transfer.write_function(|data| {
+            file.write_all(data)
+                .map(|_| data.len())
+                .map_err(|_| curl::easy::WriteError::Pause)
+        }).map_err(|error| anyhow::anyhow!("curl write_function: {}", error))?;
+        transfer.perform().map_err(|error| anyhow::anyhow!("curl: {}", error))?;
+    }
+    Ok(())
 }

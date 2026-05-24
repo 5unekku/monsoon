@@ -431,16 +431,34 @@ impl App {
         if (!path.is_absolute()) {
             return Err(anyhow::anyhow!("save path must be absolute, not relative"));
         }
-        // create the target directory up-front so libtorrent doesn't fail silently
+
+        let torrent = self.torrents.get(index)
+            .ok_or_else(|| anyhow::anyhow!("invalid index: {}", index))?;
+        let current_save = torrent.save_path.clone();
+
+        // create the target directory up-front so libtorrent doesn't fail
+        // silently, and so we can canonicalize it for the symlink check below.
         std::fs::create_dir_all(path)
             .map_err(|error| anyhow::anyhow!("create target directory: {}", error))?;
 
-        let torrent = self.torrents.get_mut(index)
-            .ok_or_else(|| anyhow::anyhow!("invalid index: {}", index))?;
+        // detect when source and destination resolve to the same real path
+        // (e.g. a symlink pointing back at the current location). submitting
+        // move_storage in that case would tell libtorrent to copy files over
+        // themselves, which is at best a no-op and at worst corruption.
+        let current_canon = std::fs::canonicalize(&current_save).ok();
+        let new_canon = std::fs::canonicalize(path).ok();
+        if let (Some(current), Some(new)) = (current_canon, new_canon) {
+            if (current == new) {
+                tracing::info!(index, path = trimmed, "move_storage: destination resolves to the same path as current; skipping");
+                return Ok(());
+            }
+        }
+
+        let torrent = self.torrents.get_mut(index).unwrap();
         torrent.handle.move_storage(trimmed);
         torrent.save_path = trimmed.to_string();
-        // outcome arrives via storage_moved_alert; persist the new path now so
-        // a daemon restart before completion still points at the right place
+        // outcome arrives via storage_moved_alert; persist now so a daemon
+        // restart before completion still points at the right location
         self.persist_torrent_list();
         tracing::info!(index, new_save_path = trimmed, "submitted move_storage");
         Ok(())
@@ -540,11 +558,20 @@ impl App {
             .map(|(_, file)| file.path.as_str())
             .collect();
 
-        // check both intra-batch and against-the-rest collisions. note that
-        // a folder rename whose target prefix is already a real folder will
-        // merge automatically here: only direct file-vs-file path collisions
-        // are rejected; coexisting files in the same destination directory
-        // are fine.
+        // the target prefix itself must not be an existing file path — that
+        // would make a name simultaneously a file and a directory prefix.
+        // merging INTO an existing folder (where the prefix is already used
+        // as a dir by other files) is explicitly allowed.
+        if (static_files.contains(&trimmed_new)) {
+            return Err(anyhow::anyhow!(
+                "\"{}\" is already a file path — cannot use it as a folder",
+                trimmed_new
+            ));
+        }
+
+        // check both intra-batch and against-the-rest collisions. merging is
+        // allowed: coexisting files in the same destination folder are fine;
+        // only file-vs-file exact path collisions are rejected.
         let mut planned_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut filtered_plan: Vec<(usize, String)> = Vec::new();
         for (file_index, new_path) in plan {
@@ -1070,25 +1097,18 @@ fn handle_network_connection(app: &mut App, mut authed: network::AuthedConnectio
     Ok(())
 }
 
-/// fetch an ip-filter blocklist via the system curl into `target`. silent
-/// HTTPS validation is delegated to curl; output goes to a temp file first
-/// and is only swapped on a successful fetch so a partial download can't
-/// poison the live filter.
+/// fetch an ip-filter blocklist into `target`. downloads to a `.partial` temp
+/// file first and atomically renames on success so a partial fetch can't
+/// corrupt the live filter.
 fn refresh_ip_filter(url: &str, target: &str) -> Result<()> {
-    use std::process::Command;
     let temp_path = format!("{}.partial", target);
-    let status = Command::new("curl")
-        .args(["-fsSL", "--max-time", "60", "-o", &temp_path, url])
-        .status()
-        .map_err(|error| anyhow::anyhow!("curl: {}", error))?;
-    if (!status.success()) {
-        let _ = std::fs::remove_file(&temp_path);
-        anyhow::bail!("curl exited with {}", status);
-    }
+    let temp = std::path::Path::new(&temp_path);
     if let Some(parent) = std::path::Path::new(target).parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::rename(&temp_path, target).context("swap ip filter into place")?;
+    crate::sources::fetch_url(temp, url)
+        .map_err(|error| { let _ = std::fs::remove_file(temp); error })?;
+    std::fs::rename(temp, target).context("swap ip filter into place")?;
     Ok(())
 }
 
@@ -1173,12 +1193,21 @@ fn check_rename_collision(
     file_index: usize,
     new_name: &str,
 ) -> Result<()> {
+    let dir_prefix = format!("{}/", new_name);
     for (other_index, file) in files.iter().enumerate() {
         if (other_index == file_index) { continue; }
         if (file.path == new_name) {
             return Err(anyhow::anyhow!(
                 "would collide with existing file at index {}: {}",
                 other_index, new_name
+            ));
+        }
+        // renaming a file to a name that is already a directory prefix of
+        // another file would make that name simultaneously a file and a dir
+        if (file.path.starts_with(&dir_prefix)) {
+            return Err(anyhow::anyhow!(
+                "\"{}\" is used as a directory by file {}: {}",
+                new_name, other_index, file.path
             ));
         }
     }
