@@ -801,6 +801,9 @@ enum SidebarItem {
     CategoryAll,
     CategoryUncategorized,
     Category(String),
+    TagHeader,
+    TagAll,
+    Tag(String),
 }
 
 struct ConfirmDelete {
@@ -988,6 +991,8 @@ struct AppState {
     category_filter: Option<Option<String>>,
     /// category names fetched from the daemon, sorted alphabetically
     sidebar_categories: Vec<String>,
+    /// when Some, only torrents with this tag are shown
+    tag_filter: Option<String>,
     detail_tab: DetailTab,
     // pane rectangles from the last draw — used by mouse handler to route
     // clicks. zero-sized when the pane is hidden.
@@ -1010,6 +1015,8 @@ struct AppState {
     column_drag: Option<ColumnDrag>,
     /// when Some, the column picker overlay is open (selection index)
     column_picker: Option<usize>,
+    /// when true, the keybind help overlay is shown
+    show_help: bool,
     /// when Some, a delete confirmation dialog is open
     confirm_delete: Option<ConfirmDelete>,
     /// folder paths that are currently collapsed in the content tab
@@ -1089,6 +1096,7 @@ impl AppState {
             status_filter: StatusFilter::All,
             category_filter: None,
             sidebar_categories: Vec::new(),
+            tag_filter: None,
             detail_tab: DetailTab::Content,
             sidebar_rect: Rect::default(),
             list_rect: Rect::default(),
@@ -1101,6 +1109,7 @@ impl AppState {
             header_y: 0,
             column_drag: None,
             column_picker: None,
+            show_help: false,
             confirm_delete: None,
             collapsed_folders: std::collections::BTreeSet::new(),
             truecolor,
@@ -1122,6 +1131,23 @@ impl AppState {
         for name in &self.sidebar_categories {
             items.push(SidebarItem::Category(name.clone()));
         }
+        // collect all tags present across all torrents
+        let mut all_tags: Vec<String> = {
+            let mut set = std::collections::BTreeSet::new();
+            for torrent in &self.torrents {
+                for tag in &torrent.tags {
+                    set.insert(tag.clone());
+                }
+            }
+            set.into_iter().collect()
+        };
+        if (!all_tags.is_empty()) {
+            items.push(SidebarItem::TagHeader);
+            items.push(SidebarItem::TagAll);
+            for tag in all_tags.drain(..) {
+                items.push(SidebarItem::Tag(tag));
+            }
+        }
         items
     }
 
@@ -1134,6 +1160,10 @@ impl AppState {
                 None => true,
                 Some(None) => torrent.category.is_none(),
                 Some(Some(name)) => torrent.category.as_deref() == Some(name.as_str()),
+            })
+            .filter(|(_, torrent)| match &self.tag_filter {
+                None => true,
+                Some(tag) => torrent.tags.contains(tag.as_str()),
             })
             .filter(|(_, torrent)| {
                 name_needle.is_empty() || torrent.name.to_lowercase().contains(&name_needle)
@@ -1221,6 +1251,19 @@ impl AppState {
                     self.table_state.select(Some(0));
                 }
             }
+            SidebarItem::TagHeader => {}
+            SidebarItem::TagAll => {
+                if (self.tag_filter.is_some()) {
+                    self.tag_filter = None;
+                    self.table_state.select(Some(0));
+                }
+            }
+            SidebarItem::Tag(tag) => {
+                if (self.tag_filter.as_deref() != Some(tag.as_str())) {
+                    self.tag_filter = Some(tag);
+                    self.table_state.select(Some(0));
+                }
+            }
         }
     }
 
@@ -1275,6 +1318,14 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     // a higher level is active.
                     let exit = if (state.priority_step.is_some()) {
                         handle_priority_step_key(key.code, key.modifiers, &mut state)
+                    } else if (state.show_help) {
+                        // any key closes help overlay
+                        if (key.code == KeyCode::Char('c') && key.modifiers == KeyModifiers::CONTROL) {
+                            true
+                        } else {
+                            state.show_help = false;
+                            false
+                        }
                     } else if (state.confirm_delete.is_some()) {
                         handle_delete_confirm_key(key.code, key.modifiers, &mut state)
                     } else if (state.column_picker.is_some()) {
@@ -1368,6 +1419,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
         (KeyCode::Delete, _) | (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('X'), KeyModifiers::SHIFT) => open_delete_confirm(state),
+        (KeyCode::Char('?'), _) => state.show_help = true,
         // file/folder priority — only when the content tab has focus. digits
         // map to qbittorrent's priority levels; libtorrent's 0..=7 is folded
         // into the five buckets the user actually cares about. on folder rows
@@ -2605,6 +2657,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.confirm_delete.is_some()) {
         draw_delete_confirm(frame, state);
     }
+    if (state.show_help) {
+        draw_help_overlay(frame);
+    }
     if (state.add_options.is_some()) {
         draw_add_options_form(frame, state);
     }
@@ -2836,6 +2891,72 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
 
 fn format_bool(value: bool) -> String {
     if (value) { "● on".to_string() } else { "○ off".to_string() }
+}
+
+fn draw_help_overlay(frame: &mut ratatui::Frame) {
+    const BINDS: &[(&str, &str)] = &[
+        ("w/s  ↑/↓", "move selection"),
+        ("a/d  ←/→", "collapse/expand tree or nav"),
+        ("tab", "cycle pane focus"),
+        ("enter", "confirm / apply"),
+        ("p", "pause / resume"),
+        ("n  ctrl+n", "add torrent"),
+        ("x  del", "delete torrent"),
+        ("r  F2", "rename torrent (or file/folder in content tab)"),
+        ("m", "move save path"),
+        ("R", "force recheck"),
+        ("T", "reannounce"),
+        ("g", "copy magnet link"),
+        ("S", "toggle sequential download"),
+        ("0-4", "set file priority (content tab)"),
+        ("/", "filter torrents by name"),
+        ("[  ]", "cycle detail tabs"),
+        ("q", "toggle sidebar"),
+        ("e", "toggle detail pane"),
+        (",  ctrl+,", "open settings"),
+        ("C", "column picker"),
+        ("?", "this help"),
+        ("ctrl+c", "quit (daemon keeps running)"),
+    ];
+    let area = frame.area();
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = (BINDS.len() as u16 + 4).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(" keybinds ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let key_width = 16usize;
+    let lines: Vec<Line> = BINDS.iter().map(|(key, desc)| {
+        Line::from(vec![
+            Span::styled(format!("{:width$}", key, width = key_width), Style::default().fg(Color::Yellow)),
+            Span::raw(*desc),
+        ])
+    }).collect();
+    frame.render_widget(Paragraph::new(lines), layout[0]);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "any key to close",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[1],
+    );
 }
 
 fn draw_column_picker(frame: &mut ratatui::Frame, state: &AppState) {
@@ -3126,6 +3247,36 @@ fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
                 let line = Line::from(vec![
                     Span::styled(mark, Style::default().fg(Color::Cyan)),
                     Span::raw(name.clone()),
+                    Span::raw("  "),
+                    Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(line)
+            }
+            SidebarItem::TagHeader => {
+                let line = Line::from(Span::styled(
+                    "  TAGS",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ));
+                ListItem::new(line)
+            }
+            SidebarItem::TagAll => {
+                let active = state.tag_filter.is_none();
+                let mark = if (active) { "● " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::Cyan)),
+                    Span::raw("all"),
+                ]);
+                ListItem::new(line)
+            }
+            SidebarItem::Tag(tag) => {
+                let active = state.tag_filter.as_deref() == Some(tag.as_str());
+                let count = state.torrents.iter()
+                    .filter(|t| t.tags.contains(tag.as_str()))
+                    .count();
+                let mark = if (active) { "● " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::Cyan)),
+                    Span::raw(tag.clone()),
                     Span::raw("  "),
                     Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
                 ]);
@@ -3755,7 +3906,9 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::styled(", ", Style::default().fg(Color::Yellow)),
         Span::raw("settings  "),
         Span::styled("^c ", Style::default().fg(Color::Yellow)),
-        Span::raw("quit"),
+        Span::raw("quit  "),
+        Span::styled("? ", Style::default().fg(Color::Yellow)),
+        Span::raw("help"),
     ]);
     frame.render_widget(
         Paragraph::new(hint)
