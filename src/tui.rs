@@ -791,6 +791,18 @@ enum PromptAction {
     RenameFolder { old_prefix: String },
 }
 
+/// a single row in the sidebar flat list. headers are visual separators;
+/// selecting one is a no-op. selectable items set the active filter.
+#[derive(Clone, PartialEq)]
+enum SidebarItem {
+    StatusHeader,
+    Status(StatusFilter),
+    CategoryHeader,
+    CategoryAll,
+    CategoryUncategorized,
+    Category(String),
+}
+
 struct ConfirmDelete {
     torrent_index: usize,
     torrent_name: String,
@@ -971,6 +983,11 @@ struct AppState {
     show_detail: bool,
     focus: Pane,
     status_filter: StatusFilter,
+    /// when Some, only torrents in this category are shown. None = no cat filter;
+    /// inner None = "(uncategorized)" (torrents with category == None).
+    category_filter: Option<Option<String>>,
+    /// category names fetched from the daemon, sorted alphabetically
+    sidebar_categories: Vec<String>,
     detail_tab: DetailTab,
     // pane rectangles from the last draw — used by mouse handler to route
     // clicks. zero-sized when the pane is hidden.
@@ -1070,6 +1087,8 @@ impl AppState {
             show_detail,
             focus: Pane::List,
             status_filter: StatusFilter::All,
+            category_filter: None,
+            sidebar_categories: Vec::new(),
             detail_tab: DetailTab::Content,
             sidebar_rect: Rect::default(),
             list_rect: Rect::default(),
@@ -1089,11 +1108,33 @@ impl AppState {
         }
     }
 
+    fn sidebar_items(&self) -> Vec<SidebarItem> {
+        let mut items = Vec::new();
+        items.push(SidebarItem::StatusHeader);
+        for filter in StatusFilter::ALL.iter().copied() {
+            items.push(SidebarItem::Status(filter));
+        }
+        items.push(SidebarItem::CategoryHeader);
+        items.push(SidebarItem::CategoryAll);
+        if (self.torrents.iter().any(|t| t.category.is_none())) {
+            items.push(SidebarItem::CategoryUncategorized);
+        }
+        for name in &self.sidebar_categories {
+            items.push(SidebarItem::Category(name.clone()));
+        }
+        items
+    }
+
     fn filtered_indices(&self) -> Vec<usize> {
         let name_needle = self.name_filter.to_lowercase();
         self.torrents.iter()
             .enumerate()
             .filter(|(_, torrent)| self.status_filter.matches(torrent))
+            .filter(|(_, torrent)| match &self.category_filter {
+                None => true,
+                Some(None) => torrent.category.is_none(),
+                Some(Some(name)) => torrent.category.as_deref() == Some(name.as_str()),
+            })
             .filter(|(_, torrent)| {
                 name_needle.is_empty() || torrent.name.to_lowercase().contains(&name_needle)
             })
@@ -1125,7 +1166,10 @@ impl AppState {
                 let length = self.filtered_indices().len();
                 move_table(&mut self.table_state, length, delta);
             }
-            Pane::Sidebar => move_list(&mut self.sidebar_state, StatusFilter::ALL.len(), delta),
+            Pane::Sidebar => {
+                let count = self.sidebar_items().len();
+                move_list(&mut self.sidebar_state, count, delta);
+            }
             Pane::Detail => match self.detail_tab {
                 DetailTab::Content => {
                     let count = if self.content_filter_matches.is_empty() && self.content_filter.is_empty() {
@@ -1147,10 +1191,33 @@ impl AppState {
     }
 
     fn apply_sidebar_selection(&mut self) {
-        if let Some(index) = self.sidebar_state.selected() {
-            if let Some(filter) = StatusFilter::ALL.get(index).copied() {
-                if (filter != self.status_filter) {
+        let Some(index) = self.sidebar_state.selected() else { return; };
+        let items = self.sidebar_items();
+        let Some(item) = items.get(index) else { return; };
+        match item.clone() {
+            SidebarItem::StatusHeader | SidebarItem::CategoryHeader => {}
+            SidebarItem::Status(filter) => {
+                if (filter != self.status_filter || self.category_filter.is_some()) {
                     self.status_filter = filter;
+                    self.category_filter = None;
+                    self.table_state.select(Some(0));
+                }
+            }
+            SidebarItem::CategoryAll => {
+                if (self.category_filter.is_some()) {
+                    self.category_filter = None;
+                    self.table_state.select(Some(0));
+                }
+            }
+            SidebarItem::CategoryUncategorized => {
+                if (self.category_filter != Some(None)) {
+                    self.category_filter = Some(None);
+                    self.table_state.select(Some(0));
+                }
+            }
+            SidebarItem::Category(name) => {
+                if (self.category_filter.as_ref().and_then(|c| c.as_deref()) != Some(name.as_str())) {
+                    self.category_filter = Some(Some(name));
                     self.table_state.select(Some(0));
                 }
             }
@@ -1300,7 +1367,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         // shift+s for sequential toggle (lowercase s is wasd-down)
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
-        (KeyCode::Delete, _) | (KeyCode::Char('X'), KeyModifiers::SHIFT) => open_delete_confirm(state),
+        (KeyCode::Delete, _) | (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('X'), KeyModifiers::SHIFT) => open_delete_confirm(state),
         // file/folder priority — only when the content tab has focus. digits
         // map to qbittorrent's priority levels; libtorrent's 0..=7 is folded
         // into the five buckets the user actually cares about. on folder rows
@@ -2155,12 +2222,12 @@ fn mouse_left_down(column: u16, row: u16, state: &mut AppState) {
         state.focus = Pane::Detail;
         return;
     }
-    // sidebar row click — select the status filter
+    // sidebar row click — select and apply filter
     if (rect_contains(state.sidebar_rect, column, row)) {
-        // sidebar has a 1-row border on top, then one row per filter
         let row_in_pane = row.saturating_sub(state.sidebar_rect.y + 1);
         let target = row_in_pane as usize;
-        if (target < StatusFilter::ALL.len()) {
+        let item_count = state.sidebar_items().len();
+        if (target < item_count) {
             state.sidebar_state.select(Some(target));
             state.apply_sidebar_selection();
         }
@@ -2226,7 +2293,8 @@ fn mouse_scroll(column: u16, row: u16, state: &mut AppState, delta: isize) {
             _ => {}
         }
     } else if (rect_contains(state.sidebar_rect, column, row)) {
-        move_list(&mut state.sidebar_state, StatusFilter::ALL.len(), delta);
+        let count = state.sidebar_items().len();
+        move_list(&mut state.sidebar_state, count, delta);
         state.apply_sidebar_selection();
     }
 }
@@ -2275,6 +2343,14 @@ fn poll_daemon(state: &mut AppState) {
         Ok(Response::Stats(stats)) => state.stats = Some(stats),
         Ok(_) => {}
         Err(_) => state.stats = None,
+    }
+    match client::send(Request::ListCategories) {
+        Ok(Response::Categories(categories)) => {
+            let mut names: Vec<String> = categories.into_iter().map(|c| c.name).collect();
+            names.sort();
+            state.sidebar_categories = names;
+        }
+        Ok(_) | Err(_) => {}
     }
 }
 
@@ -2989,26 +3065,80 @@ fn draw_title(frame: &mut ratatui::Frame, area: Rect) {
 }
 
 fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
-    let items: Vec<ListItem> = StatusFilter::ALL.iter().map(|filter| {
-        let count = state.torrents.iter().filter(|torrent| filter.matches(torrent)).count();
-        let mark = if (*filter == state.status_filter) { "● " } else { "  " };
-        let line = Line::from(vec![
-            Span::styled(mark, Style::default().fg(Color::Cyan)),
-            Span::raw(filter.label()),
-            Span::raw("  "),
-            Span::styled(
-                format!("({})", count),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]);
-        ListItem::new(line)
+    let items: Vec<ListItem> = state.sidebar_items().iter().map(|item| {
+        match item {
+            SidebarItem::StatusHeader => {
+                let line = Line::from(Span::styled(
+                    "  STATUS",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ));
+                ListItem::new(line)
+            }
+            SidebarItem::CategoryHeader => {
+                let line = Line::from(Span::styled(
+                    "  CATEGORIES",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                ));
+                ListItem::new(line)
+            }
+            SidebarItem::Status(filter) => {
+                let active = *filter == state.status_filter && state.category_filter.is_none();
+                let count = state.torrents.iter().filter(|t| filter.matches(t)).count();
+                let mark = if (active) { "● " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::Cyan)),
+                    Span::raw(filter.label()),
+                    Span::raw("  "),
+                    Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(line)
+            }
+            SidebarItem::CategoryAll => {
+                let active = state.category_filter.is_none();
+                let count = state.torrents.len();
+                let mark = if (active) { "● " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::Cyan)),
+                    Span::raw("all"),
+                    Span::raw("  "),
+                    Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(line)
+            }
+            SidebarItem::CategoryUncategorized => {
+                let active = state.category_filter == Some(None);
+                let count = state.torrents.iter().filter(|t| t.category.is_none()).count();
+                let mark = if (active) { "● " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::Cyan)),
+                    Span::styled("(none)", Style::default().fg(Color::DarkGray)),
+                    Span::raw("  "),
+                    Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(line)
+            }
+            SidebarItem::Category(name) => {
+                let active = state.category_filter.as_ref().and_then(|c| c.as_deref()) == Some(name.as_str());
+                let count = state.torrents.iter()
+                    .filter(|t| t.category.as_deref() == Some(name.as_str()))
+                    .count();
+                let mark = if (active) { "● " } else { "  " };
+                let line = Line::from(vec![
+                    Span::styled(mark, Style::default().fg(Color::Cyan)),
+                    Span::raw(name.clone()),
+                    Span::raw("  "),
+                    Span::styled(format!("({})", count), Style::default().fg(Color::DarkGray)),
+                ]);
+                ListItem::new(line)
+            }
+        }
     }).collect();
 
     let block = Block::default()
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
         .border_style(focus_border_style(state.focus == Pane::Sidebar))
-        .title(" status ");
+        .title(" filters ");
 
     let list = List::new(items)
         .block(block)
@@ -3017,19 +3147,23 @@ fn draw_sidebar(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
 
     frame.render_stateful_widget(list, area, &mut state.sidebar_state);
 
-    // selecting a sidebar entry with up/down should also apply it immediately
-    // (qBT does this — you don't have to press enter for the filter to take effect)
+    // apply immediately on nav so the list reacts without pressing enter
     state.apply_sidebar_selection();
 }
 
 fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
     let visible = state.filtered_indices();
+    let filter_label = match &state.category_filter {
+        Some(None) => "(uncategorized)".to_string(),
+        Some(Some(name)) => name.clone(),
+        None => state.status_filter.label().to_string(),
+    };
     let title = if (state.daemon_unreachable) {
-        format!(" torrents — {} (daemon unreachable) ", state.status_filter.label())
+        format!(" torrents — {} (daemon unreachable) ", filter_label)
     } else if (visible.is_empty()) {
-        format!(" torrents — {} (none) ", state.status_filter.label())
+        format!(" torrents — {} (none) ", filter_label)
     } else {
-        format!(" torrents — {} ({}) ", state.status_filter.label(), visible.len())
+        format!(" torrents — {} ({}) ", filter_label, visible.len())
     };
     let border_style = focus_border_style(state.focus == Pane::List);
 
@@ -3600,6 +3734,8 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("tabs  "),
         Span::styled("n ", Style::default().fg(Color::Yellow)),
         Span::raw("add  "),
+        Span::styled("x ", Style::default().fg(Color::Yellow)),
+        Span::raw("delete  "),
         Span::styled("p ", Style::default().fg(Color::Yellow)),
         Span::raw("pause  "),
         Span::styled("r ", Style::default().fg(Color::Yellow)),
