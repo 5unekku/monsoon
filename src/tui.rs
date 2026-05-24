@@ -791,6 +791,13 @@ enum PromptAction {
     RenameFolder { old_prefix: String },
 }
 
+struct ConfirmDelete {
+    torrent_index: usize,
+    torrent_name: String,
+    /// whether to also remove downloaded files from disk
+    delete_files: bool,
+}
+
 /// per-torrent add-time options collected by the options form before
 /// dispatch. mirrors qbittorrent's add-torrent dialog.
 #[derive(Clone)]
@@ -986,6 +993,8 @@ struct AppState {
     column_drag: Option<ColumnDrag>,
     /// when Some, the column picker overlay is open (selection index)
     column_picker: Option<usize>,
+    /// when Some, a delete confirmation dialog is open
+    confirm_delete: Option<ConfirmDelete>,
     /// folder paths that are currently collapsed in the content tab
     collapsed_folders: std::collections::BTreeSet<String>,
     /// terminal capabilities probed at startup. truecolor is recorded but
@@ -1073,6 +1082,7 @@ impl AppState {
             header_y: 0,
             column_drag: None,
             column_picker: None,
+            confirm_delete: None,
             collapsed_folders: std::collections::BTreeSet::new(),
             truecolor,
             nerd_font,
@@ -1198,6 +1208,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     // a higher level is active.
                     let exit = if (state.priority_step.is_some()) {
                         handle_priority_step_key(key.code, key.modifiers, &mut state)
+                    } else if (state.confirm_delete.is_some()) {
+                        handle_delete_confirm_key(key.code, key.modifiers, &mut state)
                     } else if (state.column_picker.is_some()) {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_options.is_some()) {
@@ -1288,6 +1300,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         // shift+s for sequential toggle (lowercase s is wasd-down)
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
+        (KeyCode::Delete, _) | (KeyCode::Char('X'), KeyModifiers::SHIFT) => open_delete_confirm(state),
         // file/folder priority — only when the content tab has focus. digits
         // map to qbittorrent's priority levels; libtorrent's 0..=7 is folded
         // into the five buckets the user actually cares about. on folder rows
@@ -1472,6 +1485,108 @@ fn toggle_sequential(state: &mut AppState) {
         Ok(_) => state.error = Some("unexpected response".to_string()),
         Err(error) => state.error = Some(format!("sequential: {}", error)),
     }
+}
+
+fn open_delete_confirm(state: &mut AppState) {
+    let Some(index) = state.selected_torrent_index() else { return; };
+    let name = state.torrents.get(index)
+        .map(|t| t.name.clone())
+        .unwrap_or_else(|| format!("torrent #{}", index));
+    state.confirm_delete = Some(ConfirmDelete {
+        torrent_index: index,
+        torrent_name: name,
+        delete_files: false,
+    });
+}
+
+fn handle_delete_confirm_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    match code {
+        KeyCode::Char('c') if modifiers == KeyModifiers::CONTROL => return true,
+        KeyCode::Esc | KeyCode::Char('n') => {
+            state.confirm_delete = None;
+        }
+        KeyCode::Enter | KeyCode::Char('y') => {
+            if let Some(confirm) = state.confirm_delete.take() {
+                match client::send(Request::Remove {
+                    index: confirm.torrent_index,
+                    delete_files: confirm.delete_files,
+                }) {
+                    Ok(Response::Ok) => {}
+                    Ok(Response::Err(message)) => state.error = Some(format!("delete: {}", message)),
+                    Ok(_) => state.error = Some("unexpected response to delete".to_string()),
+                    Err(error) => state.error = Some(format!("delete: {}", error)),
+                }
+            }
+        }
+        KeyCode::Tab | KeyCode::Char(' ') => {
+            if let Some(confirm) = state.confirm_delete.as_mut() {
+                confirm.delete_files = !confirm.delete_files;
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn draw_delete_confirm(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(confirm) = &state.confirm_delete else { return; };
+    let area = frame.area();
+    let width = 54u16.min(area.width.saturating_sub(4));
+    let height = 8u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" delete torrent ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let name = if (confirm.torrent_name.len() > inner.width as usize - 2) {
+        format!("{}…", &confirm.torrent_name[..inner.width as usize - 3])
+    } else {
+        confirm.torrent_name.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))),
+        layout[0],
+    );
+
+    let delete_files_style = if (confirm.delete_files) {
+        Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let delete_files_marker = if (confirm.delete_files) { "[x]" } else { "[ ]" };
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(format!("{} ", delete_files_marker), delete_files_style),
+            Span::styled("also delete files from disk", Style::default().fg(Color::White)),
+        ])),
+        layout[2],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "tab toggle files   y/enter confirm   n/esc cancel",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[4],
+    );
 }
 
 fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
@@ -2410,6 +2525,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     }
     if (state.column_picker.is_some()) {
         draw_column_picker(frame, state);
+    }
+    if (state.confirm_delete.is_some()) {
+        draw_delete_confirm(frame, state);
     }
     if (state.add_options.is_some()) {
         draw_add_options_form(frame, state);
