@@ -370,6 +370,7 @@ impl App {
             let status = torrent.handle.status();
             if (status.is_finished && !torrent.was_finished) {
                 torrent.was_finished = true;
+                torrent.handle.submit_save_resume_data();
                 firings.push((
                     index,
                     status.name,
@@ -772,11 +773,11 @@ impl App {
             },
             Request::Pause { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
-                Some(torrent) => { torrent.handle.pause(); Response::Ok }
+                Some(torrent) => { torrent.handle.pause(); torrent.handle.submit_save_resume_data(); Response::Ok }
             },
             Request::Resume { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
-                Some(torrent) => { torrent.handle.resume(); Response::Ok }
+                Some(torrent) => { torrent.handle.resume(); torrent.handle.submit_save_resume_data(); Response::Ok }
             },
             Request::Recheck { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
