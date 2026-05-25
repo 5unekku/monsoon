@@ -22,7 +22,8 @@ use std::time::{Duration, Instant};
 use crate::client;
 use crate::config::Config;
 use crate::ipc::{
-    PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo,
+    FeedInfo, PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo,
+    TrackerInfo,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -787,6 +788,34 @@ impl DetailTab {
 enum Mode {
     Main,
     Settings(Box<SettingsState>),
+    Feeds(Box<FeedsState>),
+}
+
+struct FeedsState {
+    feeds: Vec<FeedInfo>,
+    table_state: TableState,
+    last_poll: Instant,
+    /// transient status line shown after an action (poll, remove)
+    status: Option<String>,
+}
+
+impl FeedsState {
+    fn new() -> Self {
+        let mut table_state = TableState::default();
+        table_state.select(Some(0));
+        Self {
+            feeds: Vec::new(),
+            table_state,
+            last_poll: Instant::now() - Duration::from_secs(10),
+            status: None,
+        }
+    }
+
+    fn selected(&self) -> Option<usize> { self.table_state.selected() }
+
+    fn move_selection(&mut self, delta: isize) {
+        move_table(&mut self.table_state, self.feeds.len(), delta);
+    }
 }
 
 /// generic text-input capture. when `AppState::active_input` holds one of
@@ -852,6 +881,8 @@ enum PromptAction {
     /// individual file paths collide, so no separate merge-confirm flow is
     /// needed for the common case.
     RenameFolder { old_prefix: String },
+    /// add a new feed subscription. buffer = url; all other options are defaults.
+    AddFeed,
 }
 
 /// a single row in the sidebar flat list. headers are visual separators;
@@ -1367,6 +1398,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                 poll_detail(&mut state);
             }
         }
+        if (matches!(state.mode, Mode::Feeds(_))) {
+            poll_feeds_page(&mut state);
+        }
         if (state.priority_step.is_some()) {
             poll_priority_step(&mut state);
         }
@@ -1401,6 +1435,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                         handle_active_input_key(key.code, key.modifiers, &mut state)
                     } else if (matches!(state.mode, Mode::Settings(_))) {
                         handle_settings_key(key.code, key.modifiers, &mut state)
+                    } else if (matches!(state.mode, Mode::Feeds(_))) {
+                        handle_feeds_key(key.code, key.modifiers, &mut state)
                     } else {
                         handle_key(key.code, key.modifiers, &mut state)
                     };
@@ -1458,6 +1494,11 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
                 Ok(settings) => state.mode = Mode::Settings(Box::new(settings)),
                 Err(error) => state.error = Some(format!("settings: {}", error)),
             }
+        }
+
+        // open the feeds page
+        (KeyCode::Char('u'), KeyModifiers::NONE) => {
+            state.mode = Mode::Feeds(Box::new(FeedsState::new()));
         }
 
         // actions on the selected torrent
@@ -1847,6 +1888,31 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                 edit_buffer: None,
             });
             Ok(())
+        }
+        PromptAction::AddFeed => {
+            let url = prompt.single_line_buffer().trim().to_string();
+            if (url.is_empty()) {
+                return Err(anyhow::anyhow!("url cannot be empty"));
+            }
+            match client::send(Request::AddFeed {
+                url,
+                filter: String::new(),
+                category: None,
+                save_path: None,
+                poll_interval_minutes: 30,
+                start_paused: false,
+            })? {
+                Response::Ok => {
+                    // refresh the feeds list immediately
+                    if let Mode::Feeds(feeds) = &mut state.mode {
+                        feeds.last_poll = Instant::now() - Duration::from_secs(10);
+                        feeds.status = Some("feed added".to_string());
+                    }
+                    Ok(())
+                }
+                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
+                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
         }
     }
 }
@@ -2242,7 +2308,7 @@ fn persist_visible_columns(visible: &[Column]) {
 /// route a mouse event. only fires in main mode — overlays (prompt, settings)
 /// are keyboard-only for now to keep input flow predictable.
 fn handle_mouse(event: MouseEvent, state: &mut AppState) {
-    if (state.prompt.is_some() || matches!(state.mode, Mode::Settings(_))) {
+    if (state.prompt.is_some() || matches!(state.mode, Mode::Settings(_)) || matches!(state.mode, Mode::Feeds(_))) {
         return;
     }
     let column = event.column;
@@ -2487,6 +2553,183 @@ fn poll_detail(state: &mut AppState) {
     }
 }
 
+fn poll_feeds_page(state: &mut AppState) {
+    let Mode::Feeds(feeds) = &mut state.mode else { return; };
+    if (feeds.last_poll.elapsed() < Duration::from_secs(2)) { return; }
+    feeds.last_poll = Instant::now();
+    match client::send(Request::ListFeeds) {
+        Ok(Response::Feeds(list)) => {
+            let selected = feeds.table_state.selected().unwrap_or(0);
+            feeds.feeds = list;
+            if (!feeds.feeds.is_empty()) {
+                feeds.table_state.select(Some(selected.min(feeds.feeds.len() - 1)));
+            } else {
+                feeds.table_state.select(None);
+            }
+        }
+        Ok(_) | Err(_) => {}
+    }
+}
+
+fn handle_feeds_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Esc, _) | (KeyCode::Char('q'), KeyModifiers::NONE) => {
+            state.mode = Mode::Main;
+        }
+        (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            if let Mode::Feeds(feeds) = &mut state.mode { feeds.move_selection(1); }
+        }
+        (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            if let Mode::Feeds(feeds) = &mut state.mode { feeds.move_selection(-1); }
+        }
+        (KeyCode::PageDown, _) => {
+            if let Mode::Feeds(feeds) = &mut state.mode { feeds.move_selection(10); }
+        }
+        (KeyCode::PageUp, _) => {
+            if let Mode::Feeds(feeds) = &mut state.mode { feeds.move_selection(-10); }
+        }
+        (KeyCode::Char('n'), KeyModifiers::NONE) => {
+            state.prompt = Some(Prompt {
+                title: " add feed — enter url ".to_string(),
+                helper: "url of the rss/atom feed to subscribe to".to_string(),
+                lines: vec![String::new()],
+                cursor_line: 0,
+                action: PromptAction::AddFeed,
+                torrent_index: 0,
+                allow_multiline: false,
+            });
+        }
+        (KeyCode::Delete, _) | (KeyCode::Char('x'), KeyModifiers::NONE) => {
+            let selected = if let Mode::Feeds(feeds) = &state.mode { feeds.selected() } else { None };
+            if let Some(index) = selected {
+                match client::send(Request::RemoveFeed { index }) {
+                    Ok(Response::Ok) => {
+                        if let Mode::Feeds(feeds) = &mut state.mode {
+                            feeds.last_poll = Instant::now() - Duration::from_secs(10);
+                            feeds.status = Some(format!("feed {} removed", index));
+                        }
+                    }
+                    Ok(Response::Err(message)) => {
+                        if let Mode::Feeds(feeds) = &mut state.mode {
+                            feeds.status = Some(format!("error: {}", message));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        (KeyCode::Char('p'), KeyModifiers::NONE) => {
+            match client::send(Request::PollFeeds) {
+                Ok(Response::Ok) => {
+                    if let Mode::Feeds(feeds) = &mut state.mode {
+                        feeds.status = Some("poll triggered".to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn draw_feeds(frame: &mut ratatui::Frame, state: &mut AppState) {
+    let Mode::Feeds(feeds) = &mut state.mode else { return; };
+    let area = frame.area();
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // title
+        Constraint::Min(0),    // feed list
+        Constraint::Length(1), // detail row for selected feed
+        Constraint::Length(1), // hint / status bar
+    ])
+    .split(area);
+
+    // title bar
+    let title = Line::from(vec![
+        Span::styled(" feeds ", Style::default().add_modifier(Modifier::BOLD).bg(Color::DarkGray)),
+        Span::raw("  "),
+        Span::styled("esc to return", Style::default().fg(Color::DarkGray)),
+    ]);
+    frame.render_widget(Paragraph::new(title), layout[0]);
+
+    // feed list
+    let header_cells = [
+        Cell::from("index").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("interval").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("filter").style(Style::default().add_modifier(Modifier::BOLD)),
+        Cell::from("url").style(Style::default().add_modifier(Modifier::BOLD)),
+    ];
+    let header = Row::new(header_cells)
+        .style(Style::default().fg(Color::DarkGray))
+        .height(1);
+
+    let rows: Vec<Row> = feeds.feeds.iter().map(|feed| {
+        let interval = format!("{}min", feed.poll_interval_minutes);
+        let filter = if (feed.filter.is_empty()) { "(any)".to_string() } else { feed.filter.clone() };
+        Row::new([
+            Cell::from(feed.index.to_string()),
+            Cell::from(interval),
+            Cell::from(filter),
+            Cell::from(feed.url.clone()),
+        ])
+    }).collect();
+
+    let empty_msg = if (feeds.feeds.is_empty()) {
+        vec![Row::new([Cell::from(""), Cell::from(""), Cell::from(""), Cell::from("no feeds — press n to add one")])]
+    } else {
+        vec![]
+    };
+
+    let all_rows: Vec<Row> = if (feeds.feeds.is_empty()) { empty_msg } else { rows };
+
+    let table = Table::new(all_rows, [
+        Constraint::Length(6),
+        Constraint::Length(9),
+        Constraint::Length(28),
+        Constraint::Min(20),
+    ])
+    .header(header)
+    .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .block(Block::default().borders(Borders::NONE));
+
+    frame.render_stateful_widget(table, layout[1], &mut feeds.table_state);
+
+    // detail row: show category/save_path/paused for selected feed
+    let detail_line = feeds.table_state.selected()
+        .and_then(|i| feeds.feeds.get(i))
+        .map(|feed| {
+            let mut parts = Vec::new();
+            if let Some(cat) = &feed.category { parts.push(format!("category: {}", cat)); }
+            if let Some(path) = &feed.save_path { parts.push(format!("save path: {}", path)); }
+            if (feed.start_paused) { parts.push("start paused".to_string()); }
+            if (parts.is_empty()) { String::new() } else { format!("  {}", parts.join("  ·  ")) }
+        })
+        .unwrap_or_default();
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(detail_line, Style::default().fg(Color::DarkGray)))),
+        layout[2],
+    );
+
+    // hint / status
+    let hint = if let Some(status) = &feeds.status {
+        Line::from(Span::styled(format!(" {}", status), Style::default().fg(Color::Yellow)))
+    } else {
+        Line::from(vec![
+            Span::styled(" n", Style::default().fg(Color::Cyan)),
+            Span::styled(" add  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("x", Style::default().fg(Color::Cyan)),
+            Span::styled(" remove  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("p", Style::default().fg(Color::Cyan)),
+            Span::styled(" poll all  ", Style::default().fg(Color::DarkGray)),
+            Span::styled("esc", Style::default().fg(Color::Cyan)),
+            Span::styled(" back", Style::default().fg(Color::DarkGray)),
+        ])
+    };
+    frame.render_widget(Paragraph::new(hint), layout[3]);
+}
+
 fn poll_priority_step(state: &mut AppState) {
     let Some(step) = state.priority_step.as_mut() else { return; };
     if (step.last_poll.elapsed() < DETAIL_POLL_INTERVAL) { return; }
@@ -2708,6 +2951,8 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     }
     if (matches!(state.mode, Mode::Settings(_))) {
         draw_settings(frame, state);
+    } else if (matches!(state.mode, Mode::Feeds(_))) {
+        draw_feeds(frame, state);
     } else {
         draw_main(frame, state);
     }
@@ -2977,6 +3222,7 @@ fn draw_help_overlay(frame: &mut ratatui::Frame) {
         ("q", "toggle sidebar"),
         ("e", "toggle detail pane"),
         (",  ctrl+,", "open settings"),
+        ("u", "open feeds page"),
         ("C", "column picker"),
         ("?", "this help"),
         ("ctrl+c", "quit (daemon keeps running)"),
