@@ -58,6 +58,10 @@ pub struct App {
     config: Config,
     categories: Categories,
     tag_rules: TagRules,
+    rss_feeds: crate::rss::RssFeeds,
+    rss_seen: crate::rss::RssSeen,
+    /// last successful poll time per feed url
+    rss_last_polled: std::collections::HashMap<String, Instant>,
 }
 
 impl App {
@@ -71,7 +75,24 @@ impl App {
             tracing::warn!("failed to load rules.toml ({}); using empty set", error);
             TagRules::default()
         });
-        Ok(Self { session, torrents: Vec::new(), config, categories, tag_rules })
+        let rss_feeds = crate::rss::RssFeeds::load().unwrap_or_else(|error| {
+            tracing::warn!("failed to load feeds.toml ({}); using empty set", error);
+            crate::rss::RssFeeds::default()
+        });
+        let rss_seen = crate::rss::RssSeen::load().unwrap_or_else(|error| {
+            tracing::warn!("failed to load rss_seen.json ({}); starting fresh", error);
+            crate::rss::RssSeen::default()
+        });
+        // initialise last-polled to (now - interval) so each feed fires on
+        // the first rss check tick rather than waiting a full interval cold
+        let mut rss_last_polled = std::collections::HashMap::new();
+        for feed in &rss_feeds.feeds {
+            let ago = Instant::now()
+                .checked_sub(Duration::from_secs(feed.poll_interval_minutes * 60))
+                .unwrap_or_else(Instant::now);
+            rss_last_polled.insert(feed.url.clone(), ago);
+        }
+        Ok(Self { session, torrents: Vec::new(), config, categories, tag_rules, rss_feeds, rss_seen, rss_last_polled })
     }
 
     /// load saved torrent list and resume each one with its fastresume data
@@ -419,6 +440,53 @@ impl App {
                 "error" => tracing::error!(alert_type = %alert.alert_type, "{}", alert.message),
                 "status" => tracing::info!(alert_type = %alert.alert_type, "{}", alert.message),
                 _ => tracing::debug!(category = %alert.category, "{}", alert.message),
+            }
+        }
+    }
+
+    /// check each configured rss feed against its poll interval and add any
+    /// new matching items. returns the total number of torrents submitted.
+    pub fn poll_rss_feeds(&mut self) {
+        let now = Instant::now();
+        let feeds = self.rss_feeds.feeds.clone();
+        for feed in &feeds {
+            let interval = Duration::from_secs(feed.poll_interval_minutes * 60);
+            let due = self.rss_last_polled.get(&feed.url)
+                .map(|last| last.elapsed() >= interval)
+                .unwrap_or(true);
+            if (!due) { continue; }
+            self.rss_last_polled.insert(feed.url.clone(), now);
+
+            let items = match crate::rss::poll_feed(feed, &self.rss_seen) {
+                Ok(items) => items,
+                Err(error) => {
+                    tracing::warn!(url = %feed.url, "rss poll failed: {}", error);
+                    continue;
+                }
+            };
+
+            let mut added = 0usize;
+            for (key, uri) in items {
+                let result = match crate::sources::resolve(&uri) {
+                    Ok(crate::sources::Source::Magnet(magnet)) => {
+                        self.add_magnet(&magnet, feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused)
+                    }
+                    Ok(crate::sources::Source::File(path)) => {
+                        self.add_file(&path.to_string_lossy(), feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused)
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(_) => {
+                        self.rss_seen.insert(key);
+                        added += 1;
+                    }
+                    Err(error) => tracing::warn!(url = %feed.url, uri, "rss: add failed: {}", error),
+                }
+            }
+            if (added > 0) {
+                tracing::info!(url = %feed.url, added, "rss: added new items");
+                let _ = self.rss_seen.save();
             }
         }
     }
@@ -948,6 +1016,67 @@ impl App {
                     Response::Err(format!("unknown category: {}", name))
                 }
             }
+            Request::ListFeeds => {
+                let feeds = self.rss_feeds.feeds.iter().enumerate().map(|(index, feed)| {
+                    crate::ipc::FeedInfo {
+                        index,
+                        url: feed.url.clone(),
+                        filter: feed.filter.clone(),
+                        category: feed.category.clone(),
+                        save_path: feed.save_path.clone(),
+                        poll_interval_minutes: feed.poll_interval_minutes,
+                        start_paused: feed.start_paused,
+                    }
+                }).collect();
+                Response::Feeds(feeds)
+            }
+            Request::AddFeed { url, filter, category, save_path, poll_interval_minutes, start_paused } => {
+                let feed = crate::rss::RssFeed {
+                    url: url.clone(),
+                    filter,
+                    category,
+                    save_path,
+                    poll_interval_minutes,
+                    start_paused,
+                };
+                // replace if url already exists, otherwise append
+                if let Some(existing) = self.rss_feeds.feeds.iter_mut().find(|f| f.url == url) {
+                    *existing = feed;
+                } else {
+                    // schedule an immediate poll for new feeds
+                    let ago = Instant::now()
+                        .checked_sub(Duration::from_secs(poll_interval_minutes * 60))
+                        .unwrap_or_else(Instant::now);
+                    self.rss_last_polled.insert(url, ago);
+                    self.rss_feeds.feeds.push(feed);
+                }
+                match self.rss_feeds.save() {
+                    Ok(_) => Response::Ok,
+                    Err(error) => Response::Err(error.to_string()),
+                }
+            }
+            Request::RemoveFeed { index } => {
+                if (index >= self.rss_feeds.feeds.len()) {
+                    return Response::Err(format!("invalid feed index: {}", index));
+                }
+                let removed = self.rss_feeds.feeds.remove(index);
+                self.rss_last_polled.remove(&removed.url);
+                match self.rss_feeds.save() {
+                    Ok(_) => Response::Ok,
+                    Err(error) => Response::Err(error.to_string()),
+                }
+            }
+            Request::PollFeeds => {
+                // reset all timers so every feed fires on the next check tick
+                for feed in &self.rss_feeds.feeds {
+                    let ago = Instant::now()
+                        .checked_sub(Duration::from_secs(feed.poll_interval_minutes * 60))
+                        .unwrap_or_else(Instant::now);
+                    self.rss_last_polled.insert(feed.url.clone(), ago);
+                }
+                self.poll_rss_feeds();
+                Response::Ok
+            }
             // caller checks for this before calling handle_request
             Request::Shutdown => Response::Ok,
         }
@@ -1438,8 +1567,10 @@ pub fn run(quiet: bool) -> Result<()> {
     // initialise to now so the first periodic refresh fires one full interval
     // after startup (startup already called install_ip_filter once)
     let mut last_ip_filter_refresh = Instant::now();
+    let mut last_rss_check = Instant::now();
     const RESUME_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
     const WATCH_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+    const RSS_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 
     loop {
         if (shutdown.load(Ordering::Relaxed)) { break; }
@@ -1465,6 +1596,11 @@ pub fn run(quiet: bool) -> Result<()> {
         if (last_resume_save.elapsed() >= RESUME_SAVE_INTERVAL) {
             app.save_resume_data();
             last_resume_save = Instant::now();
+        }
+
+        if (last_rss_check.elapsed() >= RSS_CHECK_INTERVAL) {
+            app.poll_rss_feeds();
+            last_rss_check = Instant::now();
         }
 
         // periodic ip filter refresh — only when a URL is configured

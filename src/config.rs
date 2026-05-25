@@ -350,6 +350,16 @@ impl Config {
         Ok(Self::proj_dirs()?.config_dir().join("rules.toml"))
     }
 
+    /// feeds.toml — rss/atom feed subscriptions
+    pub fn feeds_path() -> Result<PathBuf> {
+        Ok(Self::proj_dirs()?.config_dir().join("feeds.toml"))
+    }
+
+    /// rss_seen.json — set of guids/links already added, prevents re-adding on restart
+    pub fn rss_seen_path() -> Result<PathBuf> {
+        Ok(Self::data_dir()?.join("rss_seen.json"))
+    }
+
     /// pidfile location for daemons launched via `monsoon daemon --detach`.
     /// lives alongside the socket so `monsoon status` / `monsoon kill` find it
     /// without consulting the daemon itself.

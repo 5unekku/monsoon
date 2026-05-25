@@ -15,6 +15,7 @@ mod tui;
 
 mod autostart;
 mod process;
+mod rss;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use ipc::Request;
@@ -217,6 +218,12 @@ enum Commands {
         interface: Option<String>,
     },
 
+    /// manage rss/atom feed subscriptions
+    Feed {
+        #[command(subcommand)]
+        action: FeedAction,
+    },
+
     /// stop the daemon
     Stop,
 
@@ -248,6 +255,36 @@ enum CategoryAction {
         index: usize,
         name: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum FeedAction {
+    /// list all configured feed subscriptions
+    List,
+    /// add or update a feed subscription
+    Add {
+        /// rss or atom feed url
+        url: String,
+        /// regex filter applied to item titles (case-sensitive unless (?i) prefix used)
+        #[arg(short, long, default_value = "")]
+        filter: String,
+        /// assign matched torrents to this category
+        #[arg(short, long)]
+        category: Option<String>,
+        /// save matched torrents here instead of the category/default path
+        #[arg(short = 'p', long)]
+        save_path: Option<String>,
+        /// how often to poll in minutes
+        #[arg(short, long, default_value_t = 30)]
+        interval: u64,
+        /// add matched torrents in paused state
+        #[arg(long)]
+        paused: bool,
+    },
+    /// remove a feed by index (from `monsoon feed list`)
+    Remove { index: usize },
+    /// force an immediate poll of all feeds right now
+    Poll,
 }
 
 #[derive(Subcommand)]
@@ -425,6 +462,18 @@ fn command_to_request(command: Commands) -> Request {
             },
             CategoryAction::Remove { name } => Request::RemoveCategory { name },
             CategoryAction::Assign { index, name } => Request::SetCategory { index, name },
+        },
+        Commands::Feed { action } => match action {
+            FeedAction::List => Request::ListFeeds,
+            FeedAction::Add { url, filter, category, save_path, interval, paused } => {
+                Request::AddFeed {
+                    url, filter, category, save_path,
+                    poll_interval_minutes: interval,
+                    start_paused: paused,
+                }
+            }
+            FeedAction::Remove { index } => Request::RemoveFeed { index },
+            FeedAction::Poll => Request::PollFeeds,
         },
         Commands::Stop => Request::Shutdown,
         Commands::Daemon { .. }

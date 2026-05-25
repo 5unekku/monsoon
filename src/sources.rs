@@ -175,6 +175,28 @@ fn normalise_path(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
+/// fetch a url into memory and return the body as a String. follows redirects,
+/// enforces a 60s timeout. intended for small text payloads (RSS feeds, etc.).
+pub fn fetch_to_string(url: &str) -> Result<String> {
+    use curl::easy::Easy;
+    use std::time::Duration;
+    let mut body: Vec<u8> = Vec::new();
+    let mut easy = Easy::new();
+    easy.url(url).map_err(|e| anyhow::anyhow!("curl url: {}", e))?;
+    easy.follow_location(true).map_err(|e| anyhow::anyhow!("{}", e))?;
+    easy.max_redirections(10).map_err(|e| anyhow::anyhow!("{}", e))?;
+    easy.connect_timeout(Duration::from_secs(30)).map_err(|e| anyhow::anyhow!("{}", e))?;
+    easy.timeout(Duration::from_secs(60)).map_err(|e| anyhow::anyhow!("{}", e))?;
+    easy.fail_on_error(true).map_err(|e| anyhow::anyhow!("{}", e))?;
+    {
+        let mut transfer = easy.transfer();
+        transfer.write_function(|data| { body.extend_from_slice(data); Ok(data.len()) })
+            .map_err(|e| anyhow::anyhow!("curl write: {}", e))?;
+        transfer.perform().map_err(|e| anyhow::anyhow!("curl: {}", e))?;
+    }
+    String::from_utf8(body).map_err(|_| anyhow::anyhow!("response is not valid utf-8"))
+}
+
 /// download a url to a local file via libcurl. follows redirects, enforces a
 /// 120s timeout, and fails with a structured error on non-2xx responses.
 /// supports http, https, ftp, and sftp (same protocols curl supports).

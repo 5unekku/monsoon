@@ -140,6 +140,21 @@ pub enum Request {
     /// re-evaluate rules.toml against every torrent and apply add_tags.
     /// returns the number of torrents whose tag set grew.
     RetagAll,
+    /// list configured rss/atom feed subscriptions
+    ListFeeds,
+    /// add or replace a feed subscription
+    AddFeed {
+        url: String,
+        filter: String,
+        category: Option<String>,
+        save_path: Option<String>,
+        poll_interval_minutes: u64,
+        start_paused: bool,
+    },
+    /// remove a feed by index (from ListFeeds order)
+    RemoveFeed { index: usize },
+    /// force an immediate poll of all feeds regardless of their intervals
+    PollFeeds,
     Shutdown,
 }
 
@@ -149,6 +164,17 @@ pub struct CategoryInfo {
     pub save_path: String,
     pub add_tags: Vec<String>,
     pub torrent_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedInfo {
+    pub index: usize,
+    pub url: String,
+    pub filter: String,
+    pub category: Option<String>,
+    pub save_path: Option<String>,
+    pub poll_interval_minutes: u64,
+    pub start_paused: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,6 +193,8 @@ pub enum Response {
     Magnet(String),
     /// list of categories
     Categories(Vec<CategoryInfo>),
+    /// list of rss feed subscriptions
+    Feeds(Vec<FeedInfo>),
     Ok,
     Err(String),
 }

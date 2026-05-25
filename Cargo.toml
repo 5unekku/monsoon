@@ -32,6 +32,8 @@ rustls-pemfile = "2"
 rcgen = { version = "0.13", default-features = false, features = ["pem", "ring"] }
 if-addrs = "0.13"
 curl = "0.4"
+quick-xml = "0.37"
+regex = "1"
 
 [build-dependencies]
 cxx-build = "1.0"

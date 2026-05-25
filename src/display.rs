@@ -1,5 +1,6 @@
 use crate::ipc::{
-    CategoryInfo, FileInfo, PeerInfo, Response, StatsInfo, TorrentDetail, TorrentInfo, TrackerInfo,
+    CategoryInfo, FeedInfo, FileInfo, PeerInfo, Response, StatsInfo, TorrentDetail, TorrentInfo,
+    TrackerInfo,
 };
 use chrono::DateTime;
 
@@ -41,6 +42,7 @@ pub fn print_response(response: Response) {
             }
         }
         Response::Categories(entries) => print_categories(&entries),
+        Response::Feeds(feeds) => print_feeds(&feeds),
         Response::Ok => {}
         Response::Err(message) => eprintln!("error: {}", message),
     }
@@ -210,6 +212,26 @@ fn print_categories(entries: &[CategoryInfo]) {
             truncate(&entry.save_path, 47),
             entry.torrent_count,
             entry.add_tags.join(","));
+    }
+}
+
+fn print_feeds(feeds: &[FeedInfo]) {
+    if (feeds.is_empty()) {
+        println!("no feeds configured (use `monsoon feed add <url>`)");
+        return;
+    }
+    println!("{:<5} {:<8} {:<24} {}", "index", "interval", "filter", "url");
+    println!("{}", "─".repeat(80));
+    for feed in feeds {
+        let interval = format!("{}min", feed.poll_interval_minutes);
+        let filter = if feed.filter.is_empty() { "(any)".to_string() } else { truncate(&feed.filter, 23) };
+        println!("{:<5} {:<8} {:<24} {}", feed.index, interval, filter, feed.url);
+        if let Some(category) = &feed.category {
+            println!("      category: {}", category);
+        }
+        if let Some(save_path) = &feed.save_path {
+            println!("      save path: {}", save_path);
+        }
     }
 }
 
