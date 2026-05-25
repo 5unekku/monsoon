@@ -1435,6 +1435,9 @@ pub fn run(quiet: bool) -> Result<()> {
     let mut last_alert_check = Instant::now();
     let mut last_resume_save = Instant::now();
     let mut last_watch_scan = Instant::now() - Duration::from_secs(60);
+    // initialise to now so the first periodic refresh fires one full interval
+    // after startup (startup already called install_ip_filter once)
+    let mut last_ip_filter_refresh = Instant::now();
     const RESUME_SAVE_INTERVAL: Duration = Duration::from_secs(5 * 60);
     const WATCH_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -1462,6 +1465,15 @@ pub fn run(quiet: bool) -> Result<()> {
         if (last_resume_save.elapsed() >= RESUME_SAVE_INTERVAL) {
             app.save_resume_data();
             last_resume_save = Instant::now();
+        }
+
+        // periodic ip filter refresh — only when a URL is configured
+        if (!app.config.ip_filter_url.trim().is_empty()) {
+            let refresh_interval = Duration::from_secs(app.config.ip_filter_refresh_hours * 3600);
+            if (last_ip_filter_refresh.elapsed() >= refresh_interval) {
+                app.install_ip_filter();
+                last_ip_filter_refresh = Instant::now();
+            }
         }
 
         match listener.accept() {
