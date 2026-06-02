@@ -224,6 +224,18 @@ enum Commands {
         action: FeedAction,
     },
 
+    /// set per-torrent rate limits (bytes/s, 0=unlimited, -1=global)
+    Limit {
+        /// torrent index from `monsoon list`
+        index: usize,
+        /// download limit in bytes/sec (0 = unlimited, -1 = inherit global)
+        #[arg(long)]
+        download: Option<i32>,
+        /// upload limit in bytes/sec (0 = unlimited, -1 = inherit global)
+        #[arg(long)]
+        upload: Option<i32>,
+    },
+
     /// stop the daemon
     Stop,
 
@@ -474,6 +486,11 @@ fn command_to_request(command: Commands) -> Request {
             }
             FeedAction::Remove { index } => Request::RemoveFeed { index },
             FeedAction::Poll => Request::PollFeeds,
+        },
+        Commands::Limit { index, download, upload } => Request::SetTorrentRateLimit {
+            index,
+            download: download.unwrap_or(-1),
+            upload: upload.unwrap_or(-1),
         },
         Commands::Stop => Request::Shutdown,
         Commands::Daemon { .. }

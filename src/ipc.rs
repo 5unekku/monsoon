@@ -33,7 +33,15 @@ pub struct TorrentInfo {
     pub tags: BTreeSet<String>,
     #[serde(default)]
     pub category: Option<String>,
+    /// per-torrent download limit in bytes/sec. -1 = inherit global, 0 = unlimited.
+    #[serde(default = "default_minus_one")]
+    pub download_limit: i32,
+    /// per-torrent upload limit in bytes/sec. -1 = inherit global, 0 = unlimited.
+    #[serde(default = "default_minus_one")]
+    pub upload_limit: i32,
 }
+
+fn default_minus_one() -> i32 { -1 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PeerInfo {
@@ -155,6 +163,8 @@ pub enum Request {
     RemoveFeed { index: usize },
     /// force an immediate poll of all feeds regardless of their intervals
     PollFeeds,
+    /// set per-torrent rate limits in bytes/sec. -1 = inherit global, 0 = unlimited.
+    SetTorrentRateLimit { index: usize, download: i32, upload: i32 },
     Shutdown,
 }
 

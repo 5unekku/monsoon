@@ -247,6 +247,12 @@ pub mod ffi {
         pub fn bridge_session_load_ip_filter(ses: Pin<&mut session>, path: &str) -> i32;
 
 
+        // per-torrent rate limits. -1 = inherit global limit, 0 = unlimited.
+        pub fn bridge_torrent_set_download_limit(hdl: &torrent_handle, limit: i32);
+        pub fn bridge_torrent_set_upload_limit(hdl: &torrent_handle, limit: i32);
+        pub fn bridge_torrent_download_limit(hdl: &torrent_handle) -> i32;
+        pub fn bridge_torrent_upload_limit(hdl: &torrent_handle) -> i32;
+
         // ─── async session stats migration ─────────────────────────────────
         // post_session_stats triggers a session_stats_alert which the bridge
         // accumulates internally. fetch the latest snapshot via the existing

@@ -1193,6 +1193,16 @@ impl App {
                 self.poll_rss_feeds();
                 Response::Ok
             }
+            Request::SetTorrentRateLimit { index, download, upload } => {
+                match self.torrents.get(index) {
+                    None => Response::Err(format!("invalid index: {}", index)),
+                    Some(torrent) => {
+                        torrent.handle.set_download_limit(download);
+                        torrent.handle.set_upload_limit(upload);
+                        Response::Ok
+                    }
+                }
+            }
             // caller checks for this before calling handle_request
             Request::Shutdown => Response::Ok,
         }
@@ -1229,6 +1239,8 @@ fn status_to_info(index: usize, torrent: &ManagedTorrent) -> TorrentInfo {
         error: status.error,
         tags: torrent.tags.clone(),
         category: torrent.category.clone(),
+        download_limit: torrent.handle.download_limit(),
+        upload_limit: torrent.handle.upload_limit(),
     }
 }
 

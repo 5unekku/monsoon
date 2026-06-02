@@ -113,6 +113,12 @@ namespace rustbridge {
     // load an ip filter from disk. returns rules-loaded count, or -1 on error.
     int32_t bridge_session_load_ip_filter(session &ses, rust::Str path);
 
+    // per-torrent rate limits (bytes/sec). -1 = inherit global, 0 = unlimited.
+    void bridge_torrent_set_download_limit(const torrent_handle &hdl, int32_t limit);
+    void bridge_torrent_set_upload_limit(const torrent_handle &hdl, int32_t limit);
+    int32_t bridge_torrent_download_limit(const torrent_handle &hdl);
+    int32_t bridge_torrent_upload_limit(const torrent_handle &hdl);
+
     // async session stats: triggers post_session_stats; the resulting alert
     // updates an internal snapshot read by bridge_get_session_stats.
     void bridge_session_post_stats(session &ses);

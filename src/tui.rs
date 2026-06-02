@@ -943,6 +943,8 @@ enum PromptAction {
     RenameFolder { old_prefix: String },
     /// add a new feed subscription. buffer = url; all other options are defaults.
     AddFeed,
+    /// set per-torrent rate limits. line 0 = download, line 1 = upload.
+    SetRateLimit,
 }
 
 /// a single row in the sidebar flat list. headers are visual separators;
@@ -1607,6 +1609,7 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         // shift+s for sequential toggle (lowercase s is wasd-down)
         (KeyCode::Char('S'), KeyModifiers::SHIFT) => toggle_sequential(state),
         (KeyCode::Char('C'), KeyModifiers::SHIFT) => state.column_picker = Some(0),
+        (KeyCode::Char('L'), KeyModifiers::SHIFT) => open_rate_limit_prompt(state),
         (KeyCode::Delete, _) | (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('X'), KeyModifiers::SHIFT) => open_delete_confirm(state),
         (KeyCode::Char('?'), _) => state.show_help = true,
         // file/folder priority — only when the content tab has focus. digits
@@ -1744,6 +1747,27 @@ fn clipboard_magnet_or_url() -> Option<String> {
         || trimmed.starts_with("https://")
         || trimmed.ends_with(".torrent");
     if looks_valid { Some(trimmed.to_string()) } else { None }
+}
+
+fn open_rate_limit_prompt(state: &mut AppState) {
+    let Some(index) = state.selected_torrent_index() else {
+        state.error = Some("no torrent selected".to_string());
+        return;
+    };
+    let (dl, ul) = state.torrents.get(index)
+        .map(|torrent| (torrent.download_limit, torrent.upload_limit))
+        .unwrap_or((-1, -1));
+    let dl_str = dl.to_string();
+    let ul_str = ul.to_string();
+    state.prompt = Some(Prompt {
+        title: format!("rate limits for torrent #{}", index),
+        helper: "bytes/sec  0 = unlimited  -1 = inherit global  line 1 = download  line 2 = upload".to_string(),
+        lines: vec![dl_str, ul_str],
+        cursor_line: 0,
+        action: PromptAction::SetRateLimit,
+        torrent_index: index,
+        allow_multiline: false,
+    });
 }
 
 fn open_add_prompt(state: &mut AppState) {
@@ -1985,6 +2009,23 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                 edit_buffer: None,
             });
             Ok(())
+        }
+        PromptAction::SetRateLimit => {
+            let download = prompt.lines.first()
+                .and_then(|line| line.trim().parse::<i32>().ok())
+                .unwrap_or(-1);
+            let upload = prompt.lines.get(1)
+                .and_then(|line| line.trim().parse::<i32>().ok())
+                .unwrap_or(-1);
+            match client::send(Request::SetTorrentRateLimit {
+                index: prompt.torrent_index,
+                download,
+                upload,
+            })? {
+                Response::Ok => Ok(()),
+                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
+                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
         }
         PromptAction::AddFeed => {
             let url = prompt.single_line_buffer().trim().to_string();
@@ -3453,6 +3494,7 @@ fn draw_help_overlay(frame: &mut ratatui::Frame) {
         ("m", "move save path"),
         ("R", "force recheck"),
         ("T", "reannounce"),
+        ("L", "set per-torrent rate limits"),
         ("g", "copy magnet link"),
         ("S", "toggle sequential download"),
         ("0-4", "set file priority (content tab)"),
@@ -4001,7 +4043,31 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let split = Layout::vertical([Constraint::Length(2), Constraint::Min(0)]).split(inner);
+    // check if the selected torrent has active rate limits to show an info line
+    let rate_limit_line: Option<String> = state.selected_torrent_index()
+        .and_then(|index| state.torrents.get(index))
+        .and_then(|torrent| {
+            let dl = torrent.download_limit;
+            let ul = torrent.upload_limit;
+            if (dl == -1 && ul == -1) { return None; }
+            let mut parts = Vec::new();
+            if (dl != -1) {
+                let text = if (dl == 0) { "∞".to_string() } else { crate::display::format_rate(dl as i64) };
+                parts.push(format!("↓ limit: {}", text));
+            }
+            if (ul != -1) {
+                let text = if (ul == 0) { "∞".to_string() } else { crate::display::format_rate(ul as i64) };
+                parts.push(format!("↑ limit: {}", text));
+            }
+            Some(parts.join("  "))
+        });
+
+    let (tab_bar_height, info_height) = if (rate_limit_line.is_some()) { (2, 1) } else { (2, 0) };
+    let split = Layout::vertical([
+        Constraint::Length(tab_bar_height),
+        Constraint::Length(info_height),
+        Constraint::Min(0),
+    ]).split(inner);
 
     state.detail_tab_bar_rect = split[0];
     let tab_titles: Vec<Line> = DetailTab::ALL.iter()
@@ -4014,7 +4080,14 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
         .divider("│");
     frame.render_widget(tabs, split[0]);
 
-    let body = split[1];
+    if let Some(text) = rate_limit_line {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(text, Style::default().fg(Color::Yellow)))),
+            split[1],
+        );
+    }
+
+    let body = split[2];
     match state.detail_tab {
         DetailTab::Content => draw_content_tab(frame, body, state),
         DetailTab::Peers => draw_peers_tab(frame, body, state),
@@ -4446,6 +4519,8 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("recheck  "),
         Span::styled("T ", Style::default().fg(Color::Yellow)),
         Span::raw("reann  "),
+        Span::styled("L ", Style::default().fg(Color::Yellow)),
+        Span::raw("rate limit  "),
         Span::styled("q/e ", Style::default().fg(Color::Yellow)),
         Span::raw("sidebar/detail  "),
         Span::styled("0-4 ", Style::default().fg(Color::Yellow)),

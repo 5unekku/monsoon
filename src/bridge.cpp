@@ -643,4 +643,26 @@ rust::Vec<float> bridge_get_file_progress(const lt::torrent_handle &hdl) {
     return result;
 }
 
+// ─── per-torrent rate limits ───────────────────────────────────────────────
+
+void bridge_torrent_set_download_limit(const lt::torrent_handle &hdl, int32_t limit) {
+    if (!hdl.is_valid()) return;
+    hdl.set_download_limit(limit);
+}
+
+void bridge_torrent_set_upload_limit(const lt::torrent_handle &hdl, int32_t limit) {
+    if (!hdl.is_valid()) return;
+    hdl.set_upload_limit(limit);
+}
+
+int32_t bridge_torrent_download_limit(const lt::torrent_handle &hdl) {
+    if (!hdl.is_valid()) return -1;
+    return hdl.download_limit();
+}
+
+int32_t bridge_torrent_upload_limit(const lt::torrent_handle &hdl) {
+    if (!hdl.is_valid()) return -1;
+    return hdl.upload_limit();
+}
+
 } // namespace rustbridge

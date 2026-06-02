@@ -191,6 +191,22 @@ impl TorrentHandle {
     pub fn use_interface(&self, interface: &str) {
         ffi::bridge_torrent_use_interface(&self.inner, interface);
     }
+
+    pub fn set_download_limit(&self, limit: i32) {
+        ffi::bridge_torrent_set_download_limit(&self.inner, limit);
+    }
+
+    pub fn set_upload_limit(&self, limit: i32) {
+        ffi::bridge_torrent_set_upload_limit(&self.inner, limit);
+    }
+
+    pub fn download_limit(&self) -> i32 {
+        ffi::bridge_torrent_download_limit(&self.inner)
+    }
+
+    pub fn upload_limit(&self) -> i32 {
+        ffi::bridge_torrent_upload_limit(&self.inner)
+    }
 }
 
 pub fn libtorrent_version() -> String {
