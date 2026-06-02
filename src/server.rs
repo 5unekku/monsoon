@@ -336,6 +336,12 @@ impl App {
             "download_rate_limit" | "dl_limit" => self.config.download_rate_limit = value.parse()?,
             "upload_rate_limit" | "ul_limit" => self.config.upload_rate_limit = value.parse()?,
             "default_save_path" => self.config.default_save_path = value.to_string(),
+            "watch_directories" => {
+                self.config.watch_directories = value.lines()
+                    .map(|line| line.trim().to_string())
+                    .filter(|line| !line.is_empty())
+                    .collect();
+            }
             "enable_dht" | "dht" => self.config.enable_dht = parse_bool(value),
             "enable_lsd" | "lsd" => self.config.enable_lsd = parse_bool(value),
             "enable_upnp" | "upnp" => self.config.enable_upnp = parse_bool(value),

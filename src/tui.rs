@@ -329,6 +329,9 @@ struct SettingField {
     kind: FieldKind,
     /// true if changing this value only takes effect on daemon restart
     restart_required: bool,
+    /// true for Vec<String> fields (newline-joined) — renders as an inline
+    /// list with add/remove/edit controls instead of a single text editor
+    is_list: bool,
 }
 
 /// schema for the settings page. ordering matters: security & anonymity first,
@@ -343,6 +346,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "fingerprint reduction: blanks the client name in peer-id, drops the http user-agent on tracker announces, disables LSD and UPnP/NAT-PMP, and suppresses optional protocol features that identify the client. independent of encryption.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -351,6 +355,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "protocol encryption between peers. 'forced' refuses plaintext peers entirely (recommended). independent of anonymous mode — does not affect tracker traffic or fingerprinting.",
         kind: FieldKind::Choice(&["enabled", "forced", "disabled"]),
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -359,6 +364,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "reject tracker responses that redirect to private/local addresses.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -367,6 +373,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "verify TLS certificates for HTTPS trackers.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -375,6 +382,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "announce to every tracker rather than stopping at the first success.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -383,6 +391,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "announce to all tracker tiers even when an earlier tier succeeds.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -391,6 +400,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "route traffic through a proxy. hard-fail semantics: if the proxy is unreachable at startup the daemon refuses to start rather than leaking on the bare interface.",
         kind: FieldKind::Choice(&["none", "socks4", "socks5", "socks5_pw", "http", "http_pw", "i2p"]),
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -399,6 +409,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "hostname or ip of the proxy server.",
         kind: FieldKind::Text,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -407,6 +418,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "port of the proxy server.",
         kind: FieldKind::Integer,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -415,6 +427,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "username for socks5_pw / http_pw proxy types.",
         kind: FieldKind::Text,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -423,6 +436,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "password for socks5_pw / http_pw proxy types.",
         kind: FieldKind::Text,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -431,6 +445,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "route peer-to-peer connections through the proxy. enable this to prevent peer ip leaks.",
         kind: FieldKind::Bool,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "security & anonymity",
@@ -439,6 +454,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "route tracker announces and scrapes through the proxy.",
         kind: FieldKind::Bool,
         restart_required: true,
+        is_list: false,
     },
 
     // ── connection (interface binding is a vpn kill-switch) ──
@@ -449,6 +465,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "bind to a specific NIC (e.g. wireguard's interface) to kill-switch traffic if the vpn drops. pick from available interfaces or choose 'specific ip' to enter a raw address. requires daemon restart.",
         kind: FieldKind::Interface,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -457,6 +474,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "incoming peer port. requires daemon restart to re-bind.",
         kind: FieldKind::Integer,
         restart_required: true,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -465,6 +483,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "automatic LAN router port forwarding via UPnP. opt-in.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -473,6 +492,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "automatic LAN router port forwarding via NAT-PMP. opt-in.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -481,6 +501,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "global peer connection ceiling. -1 means unlimited; 0 means none allowed.",
         kind: FieldKind::IntegerUnlimited,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -489,6 +510,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "global upload slot ceiling. -1 means unlimited; 0 means none allowed.",
         kind: FieldKind::IntegerUnlimited,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -497,6 +519,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "global download rate ceiling in KiB/s. 0 means unlimited.",
         kind: FieldKind::Integer,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "connection",
@@ -505,6 +528,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "global upload rate ceiling in KiB/s. 0 means unlimited.",
         kind: FieldKind::Integer,
         restart_required: false,
+        is_list: false,
     },
 
     // ── bittorrent ──
@@ -515,6 +539,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "distributed hash table for trackerless discovery.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "bittorrent",
@@ -523,6 +548,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "find peers on the same LAN via multicast.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "bittorrent",
@@ -531,6 +557,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "accept incoming µTP (UDP) connections.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "bittorrent",
@@ -539,6 +566,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "open outgoing connections over µTP.",
         kind: FieldKind::Bool,
         restart_required: false,
+        is_list: false,
     },
 
     // ── limits ──
@@ -549,6 +577,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "concurrent active downloads. -1 = unlimited; 0 = none allowed (queue but never start); 1+ = literal cap.",
         kind: FieldKind::IntegerUnlimited,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "limits",
@@ -557,6 +586,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "concurrent active uploads/seeds. -1 = unlimited; 0 = none allowed; 1+ = literal cap.",
         kind: FieldKind::IntegerUnlimited,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "limits",
@@ -565,6 +595,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "concurrent active torrents (downloads + uploads). -1 = unlimited; 0 = none allowed; 1+ = literal cap.",
         kind: FieldKind::IntegerUnlimited,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "limits",
@@ -573,6 +604,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "stop seeding at this ratio. 0 means unlimited.",
         kind: FieldKind::Float,
         restart_required: false,
+        is_list: false,
     },
     SettingField {
         section: "limits",
@@ -581,6 +613,7 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "stop seeding after this many minutes. 0 means unlimited.",
         kind: FieldKind::Integer,
         restart_required: false,
+        is_list: false,
     },
 
     // ── paths ──
@@ -591,6 +624,16 @@ const SETTING_FIELDS: &[SettingField] = &[
         description: "where new torrents save their files by default.",
         kind: FieldKind::Text,
         restart_required: false,
+        is_list: false,
+    },
+    SettingField {
+        section: "paths",
+        key: "watch_directories",
+        label: "watch directories",
+        description: "directories the daemon watches for .torrent files to auto-add. one path per entry.",
+        kind: FieldKind::Text,
+        restart_required: false,
+        is_list: true,
     },
 ];
 
@@ -645,6 +688,14 @@ struct SettingsState {
     scroll: u16,
     /// when Some, an interface dropdown is open for the current field
     interface_picker: Option<InterfacePickerState>,
+    /// current contents of the watch_directories list
+    watch_dir_list: Vec<String>,
+    /// which row in watch_dir_list is highlighted
+    watch_dir_selected: usize,
+    /// true when the user is editing a watch dir entry inline
+    watch_dir_editing: bool,
+    /// text buffer while watch_dir_editing is true
+    watch_dir_buffer: String,
 }
 
 /// list of options shown by the network-interface dropdown. each entry's
@@ -689,6 +740,7 @@ fn section_field_indices(section: &str) -> Vec<usize> {
 impl SettingsState {
     fn load() -> Result<Self> {
         let config = fetch_config()?;
+        let watch_dir_list = config.watch_directories.clone();
         Ok(Self {
             config,
             selected: 0,
@@ -697,6 +749,10 @@ impl SettingsState {
             status: None,
             scroll: 0,
             interface_picker: None,
+            watch_dir_list,
+            watch_dir_selected: 0,
+            watch_dir_editing: false,
+            watch_dir_buffer: String::new(),
         })
     }
 
@@ -727,6 +783,10 @@ impl SettingsState {
 
     fn refresh_config(&mut self) {
         if let Ok(config) = fetch_config() {
+            self.watch_dir_list = config.watch_directories.clone();
+            self.watch_dir_selected = self.watch_dir_selected.min(
+                self.watch_dir_list.len().saturating_sub(1)
+            );
             self.config = config;
         }
     }
@@ -4300,6 +4360,122 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
         return handle_interface_picker_key(code, modifiers, settings);
     }
 
+    // watch-dir inline editor — captures all input until committed/cancelled
+    if (settings.watch_dir_editing) {
+        match (code, modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Esc, _) => {
+                settings.watch_dir_editing = false;
+                settings.watch_dir_buffer.clear();
+            }
+            (KeyCode::Enter, _) => {
+                let value = settings.watch_dir_buffer.trim().to_string();
+                settings.watch_dir_editing = false;
+                settings.watch_dir_buffer.clear();
+                if (!value.is_empty()) {
+                    let index = settings.watch_dir_selected;
+                    if (index < settings.watch_dir_list.len()) {
+                        settings.watch_dir_list[index] = value;
+                    } else {
+                        settings.watch_dir_list.push(value);
+                        settings.watch_dir_selected = settings.watch_dir_list.len() - 1;
+                    }
+                    submit_watch_dirs(settings);
+                }
+            }
+            (KeyCode::Backspace, _) => { settings.watch_dir_buffer.pop(); }
+            (KeyCode::Char(character), modifiers)
+                if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT) =>
+            {
+                settings.watch_dir_buffer.push(character);
+            }
+            _ => {}
+        }
+        return false;
+    }
+
+    // watch-dir navigation — when the list field is focused, w/s/a move within the list
+    if (settings.current_field().is_list) {
+        match (code, modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            (KeyCode::Esc, _)
+            | (KeyCode::Char('q'), KeyModifiers::NONE)
+            | (KeyCode::Char(','), KeyModifiers::NONE) => {
+                state.mode = Mode::Main;
+                state.last_poll = Instant::now() - POLL_INTERVAL;
+            }
+            // move selection within the list
+            (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+                if (!settings.watch_dir_list.is_empty()) {
+                    settings.watch_dir_selected = settings.watch_dir_selected.saturating_sub(1);
+                }
+            }
+            (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+                if (!settings.watch_dir_list.is_empty()) {
+                    settings.watch_dir_selected = (settings.watch_dir_selected + 1)
+                        .min(settings.watch_dir_list.len().saturating_sub(1));
+                }
+            }
+            // tab / shift+tab still cycle settings tabs
+            (KeyCode::Tab, KeyModifiers::SHIFT) | (KeyCode::BackTab, _) => settings.switch_tab(-1),
+            (KeyCode::Tab, _) => settings.switch_tab(1),
+            // left/right cycle tabs; when on a list field a/d are reserved for add/del
+            (KeyCode::Left, _) => settings.switch_tab(-1),
+            (KeyCode::Right, _) => settings.switch_tab(1),
+            // add a new entry
+            (KeyCode::Char('a'), KeyModifiers::NONE) => {
+                settings.watch_dir_selected = settings.watch_dir_list.len();
+                settings.watch_dir_editing = true;
+                settings.watch_dir_buffer.clear();
+            }
+            // delete selected entry
+            (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Delete, _) => {
+                let index = settings.watch_dir_selected;
+                if (index < settings.watch_dir_list.len()) {
+                    settings.watch_dir_list.remove(index);
+                    settings.watch_dir_selected = index.min(
+                        settings.watch_dir_list.len().saturating_sub(1)
+                    );
+                    submit_watch_dirs(settings);
+                }
+            }
+            // edit selected entry
+            (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
+                let index = settings.watch_dir_selected;
+                let initial = settings.watch_dir_list.get(index).cloned().unwrap_or_default();
+                settings.watch_dir_buffer = initial;
+                settings.watch_dir_editing = true;
+            }
+            // move field selection up to leave the list
+            (KeyCode::PageUp, _) => settings.move_selection(-5),
+            (KeyCode::PageDown, _) => settings.move_selection(5),
+            (KeyCode::Home, _) => {
+                if let Some(first) = settings.current_tab_indices().first().copied() {
+                    settings.selected = first;
+                }
+            }
+            (KeyCode::End, _) => {
+                if let Some(last) = settings.current_tab_indices().last().copied() {
+                    settings.selected = last;
+                }
+            }
+            // number keys jump direct to tab
+            (KeyCode::Char(character), KeyModifiers::NONE) if character.is_ascii_digit() => {
+                let target = character.to_digit(10).unwrap_or(0) as usize;
+                if (target >= 1 && target <= section_tabs().len()) {
+                    settings.current_tab = target - 1;
+                    if let Some(first) = settings.current_tab_indices().first().copied() {
+                        settings.selected = first;
+                    }
+                    settings.scroll = 0;
+                }
+            }
+            _ => {}
+        }
+        return false;
+    }
+
     // active text editor — capture printable input, commit on enter, cancel on esc
     if (settings.edit_buffer.is_some()) {
         match (code, modifiers) {
@@ -4369,6 +4545,18 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
         _ => {}
     }
     false
+}
+
+/// join watch_dir_list with newlines and submit to daemon
+fn submit_watch_dirs(settings: &mut SettingsState) {
+    let joined = settings.watch_dir_list.join("\n");
+    match submit_set("watch_directories", &joined) {
+        Ok(_) => {
+            settings.status = Some("saved watch_directories".to_string());
+            settings.refresh_config();
+        }
+        Err(error) => settings.status = Some(format!("error: {}", error)),
+    }
 }
 
 fn handle_interface_picker_key(code: KeyCode, _modifiers: KeyModifiers, settings: &mut SettingsState) -> bool {
@@ -4578,8 +4766,6 @@ fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut Set
 
     for index in &indices {
         let field = &SETTING_FIELDS[*index];
-        let value = config_value_string(&settings.config, field.key);
-        let display_value = render_value(settings, *index, &value);
         let is_selected = *index == settings.selected;
         let marker = if (is_selected) { "▌ " } else { "  " };
         let label_style = if (is_selected) {
@@ -4587,27 +4773,87 @@ fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut Set
         } else {
             Style::default()
         };
-        let value_style = if (settings.edit_buffer.is_some() && is_selected) {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
-        } else if (is_selected) {
-            Style::default().fg(Color::Cyan)
+
+        if (field.is_list) {
+            // header row: label + entry count
+            let count_text = match settings.watch_dir_list.len() {
+                0 => "(none)".to_string(),
+                n => format!("{} entr{}", n, if n == 1 { "y" } else { "ies" }),
+            };
+            let count_style = if (is_selected) {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:32}", field.label), label_style),
+                Span::raw("  "),
+                Span::styled(count_text, count_style),
+            ]));
+            field_to_row.insert(*index, (lines.len() - 1) as u16);
+
+            // one row per entry, indented under the label
+            if (is_selected) {
+                for (entry_index, entry) in settings.watch_dir_list.iter().enumerate() {
+                    let row_is_selected = entry_index == settings.watch_dir_selected;
+                    let (entry_text, entry_style) = if (settings.watch_dir_editing && row_is_selected) {
+                        (
+                            format!("[ {}_ ]", settings.watch_dir_buffer),
+                            Style::default().fg(Color::Black).bg(Color::Yellow),
+                        )
+                    } else if (row_is_selected) {
+                        (
+                            format!("▸ {}", entry),
+                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                        )
+                    } else {
+                        (
+                            format!("  {}", entry),
+                            Style::default().fg(Color::Gray),
+                        )
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled(entry_text, entry_style),
+                    ]));
+                }
+                // show a blank editing row when appending a new entry
+                if (settings.watch_dir_editing && settings.watch_dir_selected >= settings.watch_dir_list.len()) {
+                    lines.push(Line::from(vec![
+                        Span::raw("    "),
+                        Span::styled(
+                            format!("[ {}_ ]", settings.watch_dir_buffer),
+                            Style::default().fg(Color::Black).bg(Color::Yellow),
+                        ),
+                    ]));
+                }
+            }
         } else {
-            Style::default().fg(Color::Gray)
-        };
-        let mut spans = vec![
-            Span::styled(marker, Style::default().fg(Color::Cyan)),
-            Span::styled(format!("{:32}", field.label), label_style),
-            Span::raw("  "),
-            Span::styled(display_value, value_style),
-        ];
-        if (field.restart_required) {
-            spans.push(Span::styled(
-                "  ⟳ restart",
-                Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
-            ));
+            let value = config_value_string(&settings.config, field.key);
+            let display_value = render_value(settings, *index, &value);
+            let value_style = if (settings.edit_buffer.is_some() && is_selected) {
+                Style::default().fg(Color::Black).bg(Color::Yellow)
+            } else if (is_selected) {
+                Style::default().fg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let mut spans = vec![
+                Span::styled(marker, Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:32}", field.label), label_style),
+                Span::raw("  "),
+                Span::styled(display_value, value_style),
+            ];
+            if (field.restart_required) {
+                spans.push(Span::styled(
+                    "  ⟳ restart",
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::ITALIC),
+                ));
+            }
+            lines.push(Line::from(spans));
+            field_to_row.insert(*index, (lines.len() - 1) as u16);
         }
-        lines.push(Line::from(spans));
-        field_to_row.insert(*index, (lines.len() - 1) as u16);
     }
 
     let viewport_height = area.height.saturating_sub(2);
@@ -4696,8 +4942,31 @@ fn draw_settings_footer(frame: &mut ratatui::Frame, area: Rect, settings: &Setti
 }
 
 fn draw_settings_hint(frame: &mut ratatui::Frame, area: Rect, settings: &SettingsState) {
-    let editing = settings.edit_buffer.is_some();
-    let hint = if (editing) {
+    let hint = if (settings.watch_dir_editing) {
+        Line::from(vec![
+            Span::styled(" type ", Style::default().fg(Color::Yellow)),
+            Span::raw("edit path  "),
+            Span::styled("enter ", Style::default().fg(Color::Yellow)),
+            Span::raw("save  "),
+            Span::styled("esc ", Style::default().fg(Color::Yellow)),
+            Span::raw("cancel"),
+        ])
+    } else if (settings.current_field().is_list) {
+        Line::from(vec![
+            Span::styled(" a ", Style::default().fg(Color::Yellow)),
+            Span::raw("add  "),
+            Span::styled("d ", Style::default().fg(Color::Yellow)),
+            Span::raw("del  "),
+            Span::styled("enter/i ", Style::default().fg(Color::Yellow)),
+            Span::raw("edit  "),
+            Span::styled("w/s ", Style::default().fg(Color::Yellow)),
+            Span::raw("move entry  "),
+            Span::styled("tab ", Style::default().fg(Color::Yellow)),
+            Span::raw("switch tab  "),
+            Span::styled("esc ", Style::default().fg(Color::Yellow)),
+            Span::raw("return"),
+        ])
+    } else if (settings.edit_buffer.is_some()) {
         Line::from(vec![
             Span::styled(" type ", Style::default().fg(Color::Yellow)),
             Span::raw("edit value  "),
