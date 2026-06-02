@@ -1025,6 +1025,12 @@ struct AddOptionsForm {
     edit_buffer: Option<String>,
 }
 
+enum PriorityRenameTarget {
+    Torrent,
+    File { file_index: usize },
+    Folder { old_prefix: String },
+}
+
 /// post-add file priority configuration step. appears after adding paused
 /// torrents so the user can cherry-pick files before any data downloads.
 /// one torrent at a time; tab/enter advances, esc skips.
@@ -1042,6 +1048,8 @@ struct PriorityStep {
     collapsed_folders: std::collections::BTreeSet<String>,
     last_poll: Instant,
     filter_active: bool,
+    rename_buffer: Option<String>,
+    rename_target: Option<PriorityRenameTarget>,
 }
 
 impl PriorityStep {
@@ -1061,6 +1069,8 @@ impl PriorityStep {
             collapsed_folders: std::collections::BTreeSet::new(),
             last_poll: Instant::now() - DETAIL_POLL_INTERVAL,
             filter_active: false,
+            rename_buffer: None,
+            rename_target: None,
         }
     }
 
@@ -2006,7 +2016,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
 
 /// total fields on the add-options form. update both this and the field
 /// renderer when adding/removing rows.
-const ADD_OPTIONS_FIELD_COUNT: usize = 5;
+const ADD_OPTIONS_FIELD_COUNT: usize = 6;
 
 fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
     let Some(form) = state.add_options.as_mut() else { return false; };
@@ -2050,8 +2060,10 @@ fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut Ap
         (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
             form.field = (form.field + ADD_OPTIONS_FIELD_COUNT - 1) % ADD_OPTIONS_FIELD_COUNT;
         }
-        // tab advances to the next pending entry (or dispatches on the last one)
-        (KeyCode::Tab, _) => advance_add_options(state),
+        // tab cycles focus just like s/down
+        (KeyCode::Tab, _) => {
+            form.field = (form.field + 1) % ADD_OPTIONS_FIELD_COUNT;
+        }
         // space/enter toggles or activates the focused field
         (KeyCode::Enter, _) | (KeyCode::Char(' '), KeyModifiers::NONE) => activate_add_options_field(state),
         _ => {}
@@ -2060,8 +2072,15 @@ fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut Ap
 }
 
 fn activate_add_options_field(state: &mut AppState) {
+    let field = {
+        let Some(form) = state.add_options.as_ref() else { return; };
+        form.field
+    };
+    if field == 5 {
+        advance_add_options(state);
+        return;
+    }
     let Some(form) = state.add_options.as_mut() else { return; };
-    let field = form.field;
     let current = form.current;
     let Some(options) = form.options.get_mut(current) else { return; };
     match field {
@@ -2859,6 +2878,28 @@ fn advance_priority_step(state: &mut AppState) {
 }
 
 fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    // rename-input mode — handle before filter/nav so esc cancels rename first
+    {
+        let Some(step) = state.priority_step.as_mut() else { return false; };
+        if step.rename_buffer.is_some() {
+            match (code, modifiers) {
+                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+                (KeyCode::Esc, _) => { step.rename_buffer = None; step.rename_target = None; }
+                (KeyCode::Enter, _) => { /* handled below — need to reborrow */ }
+                (KeyCode::Backspace, _) => { step.rename_buffer.as_mut().unwrap().pop(); }
+                (KeyCode::Char(character), modifiers)
+                    if !modifiers.contains(KeyModifiers::CONTROL)
+                        && !modifiers.contains(KeyModifiers::ALT) =>
+                { step.rename_buffer.as_mut().unwrap().push(character); }
+                _ => {}
+            }
+            // handle commit separately to avoid borrow issues
+            if code == KeyCode::Enter {
+                commit_priority_step_rename(state);
+            }
+            return false;
+        }
+    }
     // filter-input mode — handle before the navigation block so esc closes
     // the filter rather than skipping the torrent
     {
@@ -2887,12 +2928,20 @@ fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut 
             return false;
         }
     }
-    // navigation mode — advance/skip checked before re-borrowing so borrow
-    // checker doesn't see a live &mut PriorityStep during advance_priority_step
+    // navigation mode — state-mutating calls checked before re-borrowing so
+    // borrow checker doesn't see a live &mut PriorityStep during them
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
         (KeyCode::Tab, _) | (KeyCode::Enter, _) | (KeyCode::Esc, _) => {
             advance_priority_step(state);
+            return false;
+        }
+        (KeyCode::Char('r'), KeyModifiers::NONE) | (KeyCode::F(2), _) => {
+            open_priority_step_rename(state);
+            return false;
+        }
+        (KeyCode::Char('t'), KeyModifiers::NONE) => {
+            open_priority_step_torrent_rename(state);
             return false;
         }
         _ => {}
@@ -2970,6 +3019,57 @@ fn set_step_priority(step: &mut PriorityStep, priority: u8) {
     let priorities = targets.iter().map(|&i| (i, priority)).collect();
     let _ = client::send(Request::SetFilePrioritiesBatch { index: torrent_index, priorities });
     step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+}
+
+fn open_priority_step_rename(state: &mut AppState) {
+    let Some(step) = state.priority_step.as_mut() else { return; };
+    let rows = step.current_rows();
+    let Some(row) = step.files_state.selected().and_then(|i| rows.get(i)).cloned() else { return; };
+    if row.is_folder {
+        step.rename_target = Some(PriorityRenameTarget::Folder { old_prefix: row.full_path.clone() });
+        step.rename_buffer = Some(row.label.clone());
+    } else {
+        let file_index = match &step.detail {
+            Some(detail) => detail.files.iter().enumerate()
+                .find(|(_, file)| file.path == row.full_path)
+                .map(|(i, _)| i),
+            None => None,
+        };
+        let Some(file_index) = file_index else { return; };
+        // use just the filename component as the initial buffer
+        let filename = row.full_path.rsplit('/').next().unwrap_or(&row.full_path).to_string();
+        step.rename_target = Some(PriorityRenameTarget::File { file_index });
+        step.rename_buffer = Some(filename);
+    }
+}
+
+fn open_priority_step_torrent_rename(state: &mut AppState) {
+    let Some(step) = state.priority_step.as_mut() else { return; };
+    let name = step.detail.as_ref().map(|detail| detail.info.name.clone()).unwrap_or_default();
+    step.rename_target = Some(PriorityRenameTarget::Torrent);
+    step.rename_buffer = Some(name);
+}
+
+fn commit_priority_step_rename(state: &mut AppState) {
+    let Some(step) = state.priority_step.as_mut() else { return; };
+    let buffer = match step.rename_buffer.take() {
+        Some(b) => b,
+        None => return,
+    };
+    let target = match step.rename_target.take() {
+        Some(t) => t,
+        None => return,
+    };
+    let Some(torrent_index) = step.torrent_index() else { return; };
+    step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+    match target {
+        PriorityRenameTarget::Torrent =>
+            { let _ = client::send(Request::RenameTorrent { index: torrent_index, new_name: buffer }); }
+        PriorityRenameTarget::File { file_index } =>
+            { let _ = client::send(Request::RenameFile { index: torrent_index, file_index, new_name: buffer }); }
+        PriorityRenameTarget::Folder { old_prefix } =>
+            { let _ = client::send(Request::RenameFolder { index: torrent_index, old_prefix, new_prefix: buffer }); }
+    }
 }
 
 /// rebuild detail_paths_lc from the current detail, then recompute
@@ -3188,8 +3288,18 @@ fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
         frame.render_stateful_widget(table, layout[2], &mut step.files_state);
     }
 
-    // filter bar
-    if step.filter_active {
+    // filter/rename bar — rename takes priority
+    if let Some(rename_buf) = &step.rename_buffer {
+        let rename_line = Line::from(vec![
+            Span::styled(" rename ", Style::default().fg(Color::Black).bg(Color::Yellow)),
+            Span::raw(" "),
+            Span::raw(rename_buf.as_str()),
+            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::raw("   "),
+            Span::styled("esc cancel / enter confirm", Style::default().fg(Color::DarkGray)),
+        ]);
+        frame.render_widget(Paragraph::new(rename_line), layout[3]);
+    } else if step.filter_active {
         let filter_line = Line::from(vec![
             Span::styled(" files ", Style::default().fg(Color::Black).bg(Color::Yellow)),
             Span::raw(" "),
@@ -3220,6 +3330,8 @@ fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
         Span::styled("2 ", Style::default().fg(Color::Yellow)), Span::raw("normal  "),
         Span::styled("3 ", Style::default().fg(Color::Yellow)), Span::raw("high  "),
         Span::styled("4 ", Style::default().fg(Color::Yellow)), Span::raw("max  "),
+        Span::styled("r ", Style::default().fg(Color::Yellow)), Span::raw("rename  "),
+        Span::styled("t ", Style::default().fg(Color::Yellow)), Span::raw("rename torrent  "),
         Span::styled("enter/esc ", Style::default().fg(Color::Yellow)),
         Span::raw(if total > 1 { "next torrent  " } else { "done  " }),
     ]);
@@ -3262,7 +3374,7 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " tab next entry / dispatch · w/s move · enter toggle · esc cancel",
+            " w/s/tab move · enter confirm · esc cancel",
             Style::default().fg(Color::DarkGray),
         ))),
         layout[1],
@@ -3278,12 +3390,14 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
         options.save_path.clone()
     };
 
-    let rows = [
+    let button_label = if (form.current + 1 < form.entries.len()) { "[ next → ]" } else { "[ add ]" };
+    let rows: Vec<(&str, String)> = vec![
         ("start",          format_bool(options.start)),
         ("sequential",     format_bool(options.sequential)),
         ("first/last",     format_bool(options.first_last).to_string()),
         ("create subfolder", options.subfolder.label().to_string()),
         ("download path",  path_display),
+        ("",               button_label.to_string()),
     ];
     let lines: Vec<Line> = rows.iter().enumerate().map(|(index, (label, value))| {
         let is_focused = index == form.field;
@@ -3295,8 +3409,12 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
         };
         let value_style = if (is_focused && editing_path && index == 4) {
             Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else if (index == 5 && is_focused) {
+            Style::default().fg(Color::Green)
         } else if (is_focused) {
             Style::default().fg(Color::Cyan)
+        } else if (index == 5) {
+            Style::default().fg(Color::DarkGray)
         } else {
             Style::default().fg(Color::Gray)
         };
@@ -3309,13 +3427,11 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
     }).collect();
     frame.render_widget(Paragraph::new(lines), layout[3]);
 
-    let hint = if (form.current + 1 < form.entries.len()) {
-        " tab → next torrent "
-    } else {
-        " tab → add all "
-    };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(hint, Style::default().fg(Color::Yellow)))),
+        Paragraph::new(Line::from(Span::styled(
+            " enter on [ add ] to dispatch",
+            Style::default().fg(Color::DarkGray),
+        ))),
         layout[4],
     );
 }
@@ -3908,6 +4024,7 @@ fn draw_detail(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) {
 
 /// one row in the rendered file tree: either a folder header (with collapse
 /// state) or a leaf file row. file_index is None for folders.
+#[derive(Clone)]
 struct TreeRow {
     indent: usize,
     label: String,
