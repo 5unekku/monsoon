@@ -2525,13 +2525,10 @@ fn poll_daemon(state: &mut AppState) {
         Ok(_) => {}
         Err(_) => state.stats = None,
     }
-    match client::send(Request::ListCategories) {
-        Ok(Response::Categories(categories)) => {
-            let mut names: Vec<String> = categories.into_iter().map(|c| c.name).collect();
-            names.sort();
-            state.sidebar_categories = names;
-        }
-        Ok(_) | Err(_) => {}
+    if let Ok(Response::Categories(categories)) = client::send(Request::ListCategories) {
+        let mut names: Vec<String> = categories.into_iter().map(|c| c.name).collect();
+        names.sort();
+        state.sidebar_categories = names;
     }
 }
 
@@ -2557,17 +2554,14 @@ fn poll_feeds_page(state: &mut AppState) {
     let Mode::Feeds(feeds) = &mut state.mode else { return; };
     if (feeds.last_poll.elapsed() < Duration::from_secs(2)) { return; }
     feeds.last_poll = Instant::now();
-    match client::send(Request::ListFeeds) {
-        Ok(Response::Feeds(list)) => {
-            let selected = feeds.table_state.selected().unwrap_or(0);
-            feeds.feeds = list;
-            if (!feeds.feeds.is_empty()) {
-                feeds.table_state.select(Some(selected.min(feeds.feeds.len() - 1)));
-            } else {
-                feeds.table_state.select(None);
-            }
+    if let Ok(Response::Feeds(list)) = client::send(Request::ListFeeds) {
+        let selected = feeds.table_state.selected().unwrap_or(0);
+        feeds.feeds = list;
+        if (!feeds.feeds.is_empty()) {
+            feeds.table_state.select(Some(selected.min(feeds.feeds.len() - 1)));
+        } else {
+            feeds.table_state.select(None);
         }
-        Ok(_) | Err(_) => {}
     }
 }
 
@@ -2620,13 +2614,10 @@ fn handle_feeds_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState
             }
         }
         (KeyCode::Char('p'), KeyModifiers::NONE) => {
-            match client::send(Request::PollFeeds) {
-                Ok(Response::Ok) => {
-                    if let Mode::Feeds(feeds) = &mut state.mode {
-                        feeds.status = Some("poll triggered".to_string());
-                    }
+            if let Ok(Response::Ok) = client::send(Request::PollFeeds) {
+                if let Mode::Feeds(feeds) = &mut state.mode {
+                    feeds.status = Some("poll triggered".to_string());
                 }
-                _ => {}
             }
         }
         _ => {}
@@ -2735,14 +2726,11 @@ fn poll_priority_step(state: &mut AppState) {
     if (step.last_poll.elapsed() < DETAIL_POLL_INTERVAL) { return; }
     step.last_poll = Instant::now();
     let Some(torrent_index) = step.torrent_index() else { return; };
-    match client::send(Request::Info { index: torrent_index }) {
-        Ok(Response::TorrentDetail(detail)) => {
-            let detail = *detail;
-            step.paths_lc = detail.files.iter().map(|file| file.path.to_lowercase()).collect();
-            step.detail = Some(detail);
-            step.rebuild_filter_matches();
-        }
-        _ => {}
+    if let Ok(Response::TorrentDetail(detail)) = client::send(Request::Info { index: torrent_index }) {
+        let detail = *detail;
+        step.paths_lc = detail.files.iter().map(|file| file.path.to_lowercase()).collect();
+        step.detail = Some(detail);
+        step.rebuild_filter_matches();
     }
 }
 

@@ -220,7 +220,7 @@ fn print_feeds(feeds: &[FeedInfo]) {
         println!("no feeds configured (use `monsoon feed add <url>`)");
         return;
     }
-    println!("{:<5} {:<8} {:<24} {}", "index", "interval", "filter", "url");
+    println!("{:<5} {:<8} {:<24} url", "index", "interval", "filter");
     println!("{}", "─".repeat(80));
     for feed in feeds {
         let interval = format!("{}min", feed.poll_interval_minutes);

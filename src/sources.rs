@@ -87,7 +87,7 @@ pub fn resolve(input: &str) -> Result<Source> {
             std::process::id()
         ));
         fetch_url(&temp, trimmed)
-            .map_err(|error| { let _ = std::fs::remove_file(&temp); error })?;
+            .inspect_err(|_| { let _ = std::fs::remove_file(&temp); })?;
         return Ok(Source::File(temp));
     }
 

@@ -130,7 +130,7 @@ struct FeedItem {
 /// SAX-style RSS 2.0 / Atom parser. handles:
 /// - RSS 2.0: <enclosure url>, <link> text, <guid>, <torrent:magnetURI>
 /// - Atom:    <link href>, <id>
-/// namespaced local names are matched by local part only (strips prefix).
+///   namespaced local names are matched by local part only (strips prefix).
 fn parse_feed(xml: &str) -> Vec<FeedItem> {
     use quick_xml::Reader;
     use quick_xml::events::Event;

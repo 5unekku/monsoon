@@ -1237,7 +1237,7 @@ fn refresh_ip_filter(url: &str, target: &str) -> Result<()> {
         std::fs::create_dir_all(parent).ok();
     }
     crate::sources::fetch_url(temp, url)
-        .map_err(|error| { let _ = std::fs::remove_file(temp); error })?;
+        .inspect_err(|_| { let _ = std::fs::remove_file(temp); })?;
     std::fs::rename(temp, target).context("swap ip filter into place")?;
     Ok(())
 }
