@@ -65,6 +65,14 @@ pub struct App {
     /// info_hashes of torrents we've already acted on for seed limits, so we
     /// don't repeatedly pause/remove on every poll tick
     seed_limit_acted: std::collections::HashSet<String>,
+    /// sender half of the watch-dir scan channel (cloned into background threads)
+    watch_dir_tx: std::sync::mpsc::SyncSender<std::path::PathBuf>,
+    /// receiver half — drained on the main loop to add discovered .torrent files
+    watch_dir_rx: std::sync::mpsc::Receiver<std::path::PathBuf>,
+    /// true while a background scan thread is running; cleared when channel drains
+    watch_dir_busy: bool,
+    /// tracks paths already sent so a slow thread doesn't re-queue them
+    watch_dir_seen: std::collections::HashSet<std::path::PathBuf>,
 }
 
 impl App {
@@ -95,7 +103,22 @@ impl App {
                 .unwrap_or_else(Instant::now);
             rss_last_polled.insert(feed.url.clone(), ago);
         }
-        Ok(Self { session, torrents: Vec::new(), config, categories, tag_rules, rss_feeds, rss_seen, rss_last_polled, seed_limit_acted: std::collections::HashSet::new() })
+        let (watch_dir_tx, watch_dir_rx) = std::sync::mpsc::sync_channel(64);
+        Ok(Self {
+            session,
+            torrents: Vec::new(),
+            config,
+            categories,
+            tag_rules,
+            rss_feeds,
+            rss_seen,
+            rss_last_polled,
+            seed_limit_acted: std::collections::HashSet::new(),
+            watch_dir_tx,
+            watch_dir_rx,
+            watch_dir_busy: false,
+            watch_dir_seen: std::collections::HashSet::new(),
+        })
     }
 
     /// load saved torrent list and resume each one with its fastresume data
@@ -715,44 +738,38 @@ impl App {
         }
     }
 
-    /// scan each watch directory for new .torrent files. matches are auto-added
-    /// and the source file is renamed `.loaded.torrent` so the next scan ignores it.
-    /// silent on directories that don't exist — operators may symlink them in later.
-    pub fn poll_watch_dirs(&mut self) {
-        let directories = self.config.watch_directories.clone();
-        for directory in directories {
-            let path = std::path::PathBuf::from(&directory);
-            if (!path.is_dir()) { continue; }
-            let entries = match std::fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(error) => {
-                    tracing::warn!("watch dir {}: {}", directory, error);
-                    continue;
-                }
-            };
-            for entry in entries.flatten() {
-                let entry_path = entry.path();
-                if (!entry_path.is_file()) { continue; }
-                let extension = entry_path.extension().and_then(|os| os.to_str());
-                if (extension != Some("torrent")) { continue; }
-                // ignore files we already marked loaded
-                if let Some(name) = entry_path.file_name().and_then(|os| os.to_str()) {
-                    if (name.contains(".loaded.")) { continue; }
-                }
-                let path_string = entry_path.to_string_lossy().to_string();
-                match self.add_file(&path_string, None, None, false) {
-                    Ok(hash) => {
-                        tracing::info!(file = %path_string, hash, "watch: added");
-                        // rename to *.loaded.torrent
-                        let loaded = entry_path.with_extension("loaded.torrent");
-                        if let Err(error) = std::fs::rename(&entry_path, &loaded) {
-                            tracing::warn!(
-                                "could not rename {} after add: {}",
-                                entry_path.display(), error
-                            );
+    /// drain the watch-dir channel and add any newly discovered .torrent files.
+    /// when the channel empties the background thread is considered done and
+    /// watch_dir_busy is cleared so a new scan can be scheduled.
+    pub fn drain_watch_dir_rx(&mut self) {
+        loop {
+            match self.watch_dir_rx.try_recv() {
+                Ok(entry_path) => {
+                    if (!self.watch_dir_seen.contains(&entry_path)) {
+                        self.watch_dir_seen.insert(entry_path.clone());
+                        let path_string = entry_path.to_string_lossy().to_string();
+                        match self.add_file(&path_string, None, None, false) {
+                            Ok(hash) => {
+                                tracing::info!(file = %path_string, hash, "watch: added");
+                                let loaded = entry_path.with_extension("loaded.torrent");
+                                if let Err(error) = std::fs::rename(&entry_path, &loaded) {
+                                    tracing::warn!(
+                                        "could not rename {} after add: {}",
+                                        entry_path.display(), error
+                                    );
+                                }
+                            }
+                            Err(error) => tracing::warn!("watch: add {}: {}", path_string, error),
                         }
                     }
-                    Err(error) => tracing::warn!("watch: add {}: {}", path_string, error),
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    self.watch_dir_busy = false;
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.watch_dir_busy = false;
+                    break;
                 }
             }
         }
@@ -795,6 +812,41 @@ impl App {
                 }
             }
         }
+    }
+
+    /// spawn a background thread to scan watch directories and send .torrent
+    /// paths over watch_dir_tx. only called when !watch_dir_busy.
+    /// silent on directories that don't exist — operators may symlink them in later.
+    pub fn spawn_watch_dir_scan(&mut self) {
+        let directories = self.config.watch_directories.clone();
+        let tx = self.watch_dir_tx.clone();
+        self.watch_dir_busy = true;
+        std::thread::spawn(move || {
+            for directory in directories {
+                let path = std::path::PathBuf::from(&directory);
+                if (!path.is_dir()) { continue; }
+                let entries = match std::fs::read_dir(&path) {
+                    Ok(entries) => entries,
+                    Err(error) => {
+                        tracing::warn!("watch dir {}: {}", directory, error);
+                        continue;
+                    }
+                };
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if (!entry_path.is_file()) { continue; }
+                    let extension = entry_path.extension().and_then(|os| os.to_str());
+                    if (extension != Some("torrent")) { continue; }
+                    // skip files already marked as loaded
+                    if let Some(name) = entry_path.file_name().and_then(|os| os.to_str()) {
+                        if (name.contains(".loaded.")) { continue; }
+                    }
+                    // best-effort send; if the channel is full, skip this file
+                    // — it'll be picked up on the next scan cycle
+                    let _ = tx.try_send(entry_path);
+                }
+            }
+        });
     }
 
     /// submit an async save_resume_data for every torrent that has metadata.
@@ -1651,8 +1703,11 @@ pub fn run(quiet: bool) -> Result<()> {
             last_alert_check = Instant::now();
         }
 
-        if (last_watch_scan.elapsed() >= WATCH_SCAN_INTERVAL) {
-            app.poll_watch_dirs();
+        // drain whatever the background scan thread has sent, then schedule a
+        // new scan if enough time has elapsed and the previous one is done
+        app.drain_watch_dir_rx();
+        if (!app.watch_dir_busy && last_watch_scan.elapsed() >= WATCH_SCAN_INTERVAL) {
+            app.spawn_watch_dir_scan();
             app.check_seed_limits();
             last_watch_scan = Instant::now();
         }
