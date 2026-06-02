@@ -1,0 +1,13 @@
+# install: cp monsoon.desktop ~/.local/share/applications/
+#          xdg-mime default monsoon.desktop x-scheme-handler/magnet
+#          xdg-mime default monsoon.desktop application/x-bittorrent
+
+[Desktop Entry]
+Name=Monsoon
+Comment=torrent client
+Exec=monsoon add %u
+Terminal=false
+Type=Application
+MimeType=x-scheme-handler/magnet;application/x-bittorrent;
+Categories=Network;FileTransfer;
+NoDisplay=true
