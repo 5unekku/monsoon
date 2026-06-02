@@ -130,6 +130,11 @@ pub struct Config {
     /// terminal see legible text instead of tofu.
     #[serde(default)]
     pub tui_nerd_font: bool,
+    /// when true, a desktop notification is sent via notify-send when a
+    /// torrent finishes downloading. silently ignored if notify-send is not
+    /// installed.
+    #[serde(default = "default_true")]
+    pub notifications_enabled: bool,
 
     // ─── networked daemon (TLS-only) ──────────────────────────────────────
     /// optional TCP listen address for remote control (e.g. "0.0.0.0:6890"
@@ -212,6 +217,7 @@ impl Default for Config {
             tui_columns: Vec::new(),
             tui_column_widths: std::collections::BTreeMap::new(),
             tui_nerd_font: false,
+            notifications_enabled: true,
             network_listen_address: String::new(),
             network_auth_token: String::new(),
             network_cert_path: String::new(),

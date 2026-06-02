@@ -355,6 +355,7 @@ impl App {
                     "auto_resume saved but only applies on daemon restart"
                 ));
             }
+            "notifications_enabled" => self.config.notifications_enabled = parse_bool(value),
             _ => return Err(anyhow::anyhow!("unknown config key: {}", key)),
         }
         self.session.apply_settings(&self.config);
@@ -406,6 +407,9 @@ impl App {
         }
         for (index, name, hash, save_path, size, category) in firings {
             spawn_completion_script(&script_path, timeout, &name, &hash, &save_path, size, category.as_deref());
+            if (self.config.notifications_enabled) {
+                spawn_notification(&name, size as u64);
+            }
             tracing::info!(index, name, "fired completion script");
         }
     }
@@ -1259,6 +1263,13 @@ fn probe_proxy(host: &str, port: u16) -> Result<()> {
         .map_err(|error| anyhow::anyhow!("connect {}: {}", address, error))?;
     tracing::info!(proxy = %address, "proxy reachable");
     Ok(())
+}
+
+fn spawn_notification(name: &str, size: u64) {
+    let body = format!("{} ({})", name, bytesize::ByteSize(size));
+    let _ = std::process::Command::new("notify-send")
+        .args(["Monsoon — download complete", &body, "--app-name=monsoon", "--urgency=normal", "--icon=network-transmit-receive"])
+        .spawn();
 }
 
 fn spawn_completion_script(
