@@ -207,6 +207,14 @@ impl TorrentHandle {
     pub fn upload_limit(&self) -> i32 {
         ffi::bridge_torrent_upload_limit(&self.inner)
     }
+
+    pub fn add_tracker(&self, url: &str, tier: i32) {
+        ffi::bridge_torrent_add_tracker(&self.inner, url, tier);
+    }
+
+    pub fn remove_tracker(&self, url: &str) {
+        ffi::bridge_torrent_remove_tracker(&self.inner, url);
+    }
 }
 
 pub fn libtorrent_version() -> String {

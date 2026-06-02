@@ -1203,6 +1203,14 @@ impl App {
                     }
                 }
             }
+            Request::AddTracker { index, url, tier } => match self.torrents.get(index) {
+                None => Response::Err(format!("invalid index: {}", index)),
+                Some(torrent) => { torrent.handle.add_tracker(&url, tier); Response::Ok }
+            },
+            Request::RemoveTracker { index, url } => match self.torrents.get(index) {
+                None => Response::Err(format!("invalid index: {}", index)),
+                Some(torrent) => { torrent.handle.remove_tracker(&url); Response::Ok }
+            },
             // caller checks for this before calling handle_request
             Request::Shutdown => Response::Ok,
         }

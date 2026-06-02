@@ -110,6 +110,12 @@ namespace rustbridge {
     // bind this torrent's outgoing connections to a specific interface
     void bridge_torrent_use_interface(const torrent_handle &hdl, rust::Str interface);
 
+    // add a tracker url to a torrent at the given tier
+    void bridge_torrent_add_tracker(const torrent_handle &hdl, rust::Str url, int32_t tier);
+
+    // remove a tracker by url from a torrent
+    void bridge_torrent_remove_tracker(const torrent_handle &hdl, rust::Str url);
+
     // load an ip filter from disk. returns rules-loaded count, or -1 on error.
     int32_t bridge_session_load_ip_filter(session &ses, rust::Str path);
 

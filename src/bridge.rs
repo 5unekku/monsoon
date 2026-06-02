@@ -228,6 +228,12 @@ pub mod ffi {
         // per-torrent tracker list (one row per tier/url)
         pub fn bridge_get_torrent_trackers(hdl: &torrent_handle) -> Vec<TorrentTracker>;
 
+        // add a tracker url at the given tier
+        pub fn bridge_torrent_add_tracker(hdl: &torrent_handle, url: &str, tier: i32);
+
+        // remove a tracker by url
+        pub fn bridge_torrent_remove_tracker(hdl: &torrent_handle, url: &str);
+
         // per-file completion fraction (0.0..=1.0), order matches bridge_get_torrent_files
         pub fn bridge_get_file_progress(hdl: &torrent_handle) -> Vec<f32>;
 

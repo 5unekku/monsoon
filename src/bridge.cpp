@@ -581,6 +581,27 @@ void bridge_torrent_use_interface(const lt::torrent_handle &hdl, rust::Str inter
     hdl.use_interface(std::string(interface).c_str());
 }
 
+// ─── tracker add / remove ──────────────────────────────────────────────────
+
+void bridge_torrent_add_tracker(const lt::torrent_handle &hdl, rust::Str url, int32_t tier) {
+    if (!hdl.is_valid()) return;
+    lt::announce_entry entry{std::string(url)};
+    entry.tier = static_cast<uint8_t>(tier < 0 ? 0 : tier);
+    hdl.add_tracker(entry);
+}
+
+void bridge_torrent_remove_tracker(const lt::torrent_handle &hdl, rust::Str url) {
+    if (!hdl.is_valid()) return;
+    std::string target(url);
+    auto current = hdl.trackers();
+    std::vector<lt::announce_entry> filtered;
+    for (auto const &entry : current) {
+        if (entry.url != target)
+            filtered.push_back(entry);
+    }
+    hdl.replace_trackers(filtered);
+}
+
 // ─── ip filter ─────────────────────────────────────────────────────────────
 // supports both PeerGuardian P2P "name:start-end" lines and plain CIDR/range
 // lines. blank lines and lines starting with '#' or ';' are ignored.

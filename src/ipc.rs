@@ -165,6 +165,10 @@ pub enum Request {
     PollFeeds,
     /// set per-torrent rate limits in bytes/sec. -1 = inherit global, 0 = unlimited.
     SetTorrentRateLimit { index: usize, download: i32, upload: i32 },
+    /// add a tracker url to a torrent at the given tier
+    AddTracker { index: usize, url: String, tier: i32 },
+    /// remove a tracker url from a torrent
+    RemoveTracker { index: usize, url: String },
     Shutdown,
 }
 

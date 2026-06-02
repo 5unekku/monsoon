@@ -945,6 +945,8 @@ enum PromptAction {
     AddFeed,
     /// set per-torrent rate limits. line 0 = download, line 1 = upload.
     SetRateLimit,
+    /// add a tracker url to the active torrent. buffer = url.
+    AddTracker,
 }
 
 /// a single row in the sidebar flat list. headers are visual separators;
@@ -1144,6 +1146,7 @@ struct AppState {
     sidebar_state: ListState,
     detail_files_state: TableState,
     detail_peers_state: TableState,
+    detail_trackers_state: TableState,
     last_poll: Instant,
     last_detail_poll: Instant,
     error: Option<String>,
@@ -1255,6 +1258,7 @@ impl AppState {
             sidebar_state,
             detail_files_state: TableState::default(),
             detail_peers_state: TableState::default(),
+            detail_trackers_state: TableState::default(),
             last_poll: Instant::now() - POLL_INTERVAL,
             last_detail_poll: Instant::now() - DETAIL_POLL_INTERVAL,
             error: None,
@@ -1385,7 +1389,10 @@ impl AppState {
                     let count = self.detail.as_ref().map(|detail| detail.peers.len()).unwrap_or(0);
                     move_table(&mut self.detail_peers_state, count, delta);
                 }
-                DetailTab::Trackers => {}
+                DetailTab::Trackers => {
+                    let count = self.detail.as_ref().map(|detail| detail.trackers.len()).unwrap_or(0);
+                    move_table(&mut self.detail_trackers_state, count, delta);
+                }
             },
         }
     }
@@ -1548,6 +1555,17 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => state.move_focused(-1),
         (KeyCode::PageDown, _) => state.move_focused(10),
         (KeyCode::PageUp, _) => state.move_focused(-10),
+        // tracker tab: a = add tracker prompt, d = remove selected tracker
+        (KeyCode::Char('a'), KeyModifiers::NONE)
+            if (state.focus == Pane::Detail && state.detail_tab == DetailTab::Trackers) =>
+        {
+            open_add_tracker_prompt(state);
+        }
+        (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Delete, _)
+            if (state.focus == Pane::Detail && state.detail_tab == DetailTab::Trackers) =>
+        {
+            remove_selected_tracker(state);
+        }
         // a/d (or arrows) collapse/expand the focused folder in the content tab
         (KeyCode::Char('a'), KeyModifiers::NONE) | (KeyCode::Left, _) => collapse_focused(state, true),
         (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Right, _) => collapse_focused(state, false),
@@ -1819,6 +1837,51 @@ fn show_magnet(state: &mut AppState) {
     }
 }
 
+fn open_add_tracker_prompt(state: &mut AppState) {
+    let Some(index) = state.selected_torrent_index() else {
+        state.error = Some("no torrent selected".to_string());
+        return;
+    };
+    state.prompt = Some(Prompt {
+        title: format!("add tracker to torrent #{}", index),
+        helper: "announce url (e.g. udp://tracker.example.com:1337/announce)".to_string(),
+        lines: vec![String::new()],
+        cursor_line: 0,
+        action: PromptAction::AddTracker,
+        torrent_index: index,
+        allow_multiline: false,
+    });
+}
+
+fn remove_selected_tracker(state: &mut AppState) {
+    let Some(torrent_index) = state.selected_torrent_index() else {
+        state.error = Some("no torrent selected".to_string());
+        return;
+    };
+    let Some(detail) = &state.detail else {
+        state.error = Some("tracker list not loaded".to_string());
+        return;
+    };
+    let Some(row_index) = state.detail_trackers_state.selected() else {
+        state.error = Some("no tracker selected".to_string());
+        return;
+    };
+    let Some(tracker) = detail.trackers.get(row_index) else {
+        state.error = Some("tracker index out of range".to_string());
+        return;
+    };
+    let url = tracker.url.clone();
+    match client::send(Request::RemoveTracker { index: torrent_index, url: url.clone() }) {
+        Ok(Response::Ok) => {
+            state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+            state.error = Some(format!("removed tracker: {}", url));
+        }
+        Ok(Response::Err(message)) => state.error = Some(format!("remove tracker: {}", message)),
+        Ok(_) => state.error = Some("unexpected response".to_string()),
+        Err(error) => state.error = Some(format!("remove tracker: {}", error)),
+    }
+}
+
 fn toggle_sequential(state: &mut AppState) {
     // there's no canonical "is_sequential" surfaced in TorrentInfo today, so
     // this keybind always toggles to ON. a future ipc roundtrip can flip back.
@@ -2046,6 +2109,25 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                         feeds.last_poll = Instant::now() - Duration::from_secs(10);
                         feeds.status = Some("feed added".to_string());
                     }
+                    Ok(())
+                }
+                Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
+                _ => Err(anyhow::anyhow!("unexpected response")),
+            }
+        }
+        PromptAction::AddTracker => {
+            let url = prompt.single_line_buffer().trim().to_string();
+            if (url.is_empty()) {
+                return Err(anyhow::anyhow!("tracker url cannot be empty"));
+            }
+            match client::send(Request::AddTracker {
+                index: prompt.torrent_index,
+                url,
+                tier: 0,
+            })? {
+                Response::Ok => {
+                    // force re-poll so the new tracker shows up immediately
+                    state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
                     Ok(())
                 }
                 Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
@@ -2632,7 +2714,10 @@ fn mouse_scroll(column: u16, row: u16, state: &mut AppState, delta: isize) {
                 let count = state.detail.as_ref().map(|detail| detail.peers.len()).unwrap_or(0);
                 move_table(&mut state.detail_peers_state, count, delta);
             }
-            _ => {}
+            DetailTab::Trackers => {
+                let count = state.detail.as_ref().map(|detail| detail.trackers.len()).unwrap_or(0);
+                move_table(&mut state.detail_trackers_state, count, delta);
+            }
         }
     } else if (rect_contains(state.sidebar_rect, column, row)) {
         let count = state.sidebar_items().len();
@@ -3752,7 +3837,7 @@ fn draw_main(frame: &mut ratatui::Frame, state: &mut AppState) {
     }
 
     draw_status_bar(frame, outer[2], state);
-    draw_hint_bar(frame, outer[3]);
+    draw_hint_bar(frame, outer[3], state);
 }
 
 fn focus_border_style(focused: bool) -> Style {
@@ -4455,8 +4540,11 @@ fn draw_trackers_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
         Constraint::Length(9),
         Constraint::Min(20),
     ];
-    let table = Table::new(rows, widths).header(header);
-    frame.render_widget(table, area);
+    let table = Table::new(rows, widths)
+        .header(header)
+        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .highlight_symbol("▌ ");
+    frame.render_stateful_widget(table, area, &mut state.detail_trackers_state);
 }
 
 fn draw_input_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
@@ -4497,8 +4585,9 @@ fn draw_status_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
     frame.render_widget(bar, area);
 }
 
-fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
-    let hint = Line::from(vec![
+fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
+    let in_trackers = state.focus == Pane::Detail && state.detail_tab == DetailTab::Trackers;
+    let mut spans = vec![
         Span::styled(" w/s ", Style::default().fg(Color::Yellow)),
         Span::raw("move  "),
         Span::styled("tab ", Style::default().fg(Color::Yellow)),
@@ -4533,9 +4622,16 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect) {
         Span::raw("quit  "),
         Span::styled("? ", Style::default().fg(Color::Yellow)),
         Span::raw("help"),
-    ]);
+    ];
+    if (in_trackers) {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled("a ", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw("add  "));
+        spans.push(Span::styled("d ", Style::default().fg(Color::Yellow)));
+        spans.push(Span::raw("del"));
+    }
     frame.render_widget(
-        Paragraph::new(hint)
+        Paragraph::new(Line::from(spans))
             .alignment(Alignment::Left)
             .style(Style::default().fg(Color::Gray)),
         area,
