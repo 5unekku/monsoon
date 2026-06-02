@@ -1120,6 +1120,9 @@ struct AppState {
     #[allow(dead_code)]
     truecolor: bool,
     nerd_font: bool,
+    /// set to true whenever state changes; cleared after each draw. gates
+    /// terminal.draw so idle ticks with no events skip the render pass.
+    dirty: bool,
 }
 
 impl AppState {
@@ -1208,6 +1211,7 @@ impl AppState {
             collapsed_folders: std::collections::BTreeSet::new(),
             truecolor,
             nerd_font,
+            dirty: true,
         }
     }
 
@@ -1393,19 +1397,26 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         if (matches!(state.mode, Mode::Main)) {
             if (state.last_poll.elapsed() >= POLL_INTERVAL) {
                 poll_daemon(&mut state);
+                state.dirty = true;
             }
             if (state.show_detail && state.last_detail_poll.elapsed() >= DETAIL_POLL_INTERVAL) {
                 poll_detail(&mut state);
+                state.dirty = true;
             }
         }
         if (matches!(state.mode, Mode::Feeds(_))) {
             poll_feeds_page(&mut state);
+            state.dirty = true;
         }
         if (state.priority_step.is_some()) {
             poll_priority_step(&mut state);
+            state.dirty = true;
         }
 
-        terminal.draw(|frame| draw(frame, &mut state))?;
+        if (state.dirty) {
+            terminal.draw(|frame| draw(frame, &mut state))?;
+            state.dirty = false;
+        }
 
         if (event::poll(EVENT_TICK)?) {
             match event::read()? {
@@ -1441,8 +1452,12 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                         handle_key(key.code, key.modifiers, &mut state)
                     };
                     if (exit) { return Ok(()); }
+                    state.dirty = true;
                 }
-                Event::Mouse(mouse) => handle_mouse(mouse, &mut state),
+                Event::Mouse(mouse) => {
+                    handle_mouse(mouse, &mut state);
+                    state.dirty = true;
+                }
                 _ => {}
             }
         }
