@@ -1665,11 +1665,23 @@ fn open_content_rename_prompt(state: &mut AppState) {
     }
 }
 
+fn clipboard_magnet_or_url() -> Option<String> {
+    let mut board = arboard::Clipboard::new().ok()?;
+    let text = board.get_text().ok()?;
+    let trimmed = text.trim();
+    let looks_valid = trimmed.starts_with("magnet:")
+        || trimmed.starts_with("http://")
+        || trimmed.starts_with("https://")
+        || trimmed.ends_with(".torrent");
+    if looks_valid { Some(trimmed.to_string()) } else { None }
+}
+
 fn open_add_prompt(state: &mut AppState) {
+    let prefill = clipboard_magnet_or_url().unwrap_or_default();
     state.prompt = Some(Prompt {
         title: "add torrent (shift+enter to add another line)".to_string(),
         helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, or ~/foo.torrent — one per line".to_string(),
-        lines: vec![String::new()],
+        lines: vec![prefill],
         cursor_line: 0,
         action: PromptAction::Add,
         torrent_index: 0,
