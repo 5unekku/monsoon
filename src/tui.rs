@@ -1959,6 +1959,11 @@ fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut Ap
             {
                 if let Some(buffer) = form.edit_buffer.as_mut() { buffer.push(character); }
             }
+            (KeyCode::Tab, _) => {
+                if let Some(buffer) = form.edit_buffer.as_mut() {
+                    *buffer = tab_complete_path(buffer);
+                }
+            }
             _ => {}
         }
         return false;
@@ -2124,6 +2129,15 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
             if let Some(prompt) = state.prompt.as_mut() {
                 if let Some(line) = prompt.lines.get_mut(prompt.cursor_line) {
                     line.push(character);
+                }
+            }
+        }
+        (KeyCode::Tab, _) => {
+            if let Some(prompt) = state.prompt.as_mut() {
+                if matches!(prompt.action, PromptAction::Move | PromptAction::AddFeed) {
+                    if let Some(line) = prompt.lines.get_mut(prompt.cursor_line) {
+                        *line = tab_complete_path(line);
+                    }
                 }
             }
         }
@@ -2930,6 +2944,40 @@ fn tab_complete_content_filter(state: &mut AppState) {
         }
         rebuild_content_matches(state);
         state.detail_files_state.select(Some(0));
+    }
+}
+
+// expand `buffer` to the longest common prefix of all filesystem entries
+// that start with the partial name after the last `/`.
+fn tab_complete_path(buffer: &str) -> String {
+    let (dir_part, prefix) = match buffer.rfind('/') {
+        None => (".", ""),
+        Some(index) => (&buffer[..=index], &buffer[index + 1..]),
+    };
+    let Ok(entries) = std::fs::read_dir(dir_part) else { return buffer.to_string(); };
+    let prefix_lc = prefix.to_lowercase();
+    let mut candidates: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.to_lowercase().starts_with(&prefix_lc) { return None; }
+            let is_dir = entry.file_type().map(|file_type| file_type.is_dir()).unwrap_or(false);
+            let candidate = if dir_part == "." {
+                if is_dir { format!("{}/", name) } else { name }
+            } else {
+                if is_dir { format!("{}{}/", dir_part, name) } else { format!("{}{}", dir_part, name) }
+            };
+            Some(candidate)
+        })
+        .collect();
+    candidates.sort();
+    match candidates.len() {
+        0 => buffer.to_string(),
+        1 => candidates.remove(0),
+        _ => {
+            let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
+            longest_common_prefix_ci(&refs)
+        }
     }
 }
 
