@@ -30,6 +30,10 @@ pub mod ffi {
         pub completed_time: i64,
         pub list_peers: i32,
         pub list_seeds: i32,
+        /// upload / max(1, total_done) ratio
+        pub ratio: f64,
+        /// seconds spent seeding
+        pub seeding_time: i64,
     }
 
     #[derive(Debug, Clone)]

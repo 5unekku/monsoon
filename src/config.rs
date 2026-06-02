@@ -59,6 +59,9 @@ pub struct Config {
     pub seed_ratio_limit: f64,
     /// stop seeding after this many minutes (0 = unlimited)
     pub seed_time_limit: i32,
+    /// action when a seed limit is hit: "pause" or "remove"
+    #[serde(default = "default_seed_ratio_action")]
+    pub seed_ratio_action: String,
 
     // ─── proxy / anonymity network ────────────────────────────────────────
     /// proxy type: "none", "socks4", "socks5", "socks5_pw", "http",
@@ -157,6 +160,7 @@ pub struct Config {
     pub network_key_path: String,
 }
 
+fn default_seed_ratio_action() -> String { "pause".to_string() }
 fn default_completion_script_timeout() -> u64 { 60 }
 fn default_tui_sidebar_width() -> u16 { 22 }
 fn default_tui_detail_split_percent() -> u16 { 40 }
@@ -197,6 +201,7 @@ impl Default for Config {
             max_active_torrents: 8,
             seed_ratio_limit: 0.0,
             seed_time_limit: 0,
+            seed_ratio_action: default_seed_ratio_action(),
             proxy_type: default_proxy_type(),
             proxy_host: String::new(),
             proxy_port: 0,
@@ -270,6 +275,9 @@ impl Config {
         if (self.seed_time_limit < 0) { self.seed_time_limit = default.seed_time_limit; }
 
         // enum-shaped strings
+        if (!matches!(self.seed_ratio_action.as_str(), "pause" | "remove")) {
+            self.seed_ratio_action = default.seed_ratio_action.clone();
+        }
         if (!matches!(self.encryption_mode.as_str(), "enabled" | "forced" | "disabled")) {
             self.encryption_mode = default.encryption_mode.clone();
         }

@@ -309,6 +309,12 @@ rustbridge::TorrentStatus bridge_get_torrent_status(const lt::torrent_handle &hd
     ts.completed_time = st.completed_time;
     ts.list_peers = st.list_peers;
     ts.list_seeds = st.list_seeds;
+    {
+        int64_t denominator = std::max<int64_t>(static_cast<int64_t>(st.total_done), int64_t(1));
+        ts.ratio = static_cast<double>(st.all_time_upload) / static_cast<double>(denominator);
+    }
+    ts.seeding_time = static_cast<int64_t>(
+        std::chrono::duration_cast<std::chrono::seconds>(st.seeding_duration).count());
     return ts;
 }
 

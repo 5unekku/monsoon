@@ -62,6 +62,9 @@ pub struct App {
     rss_seen: crate::rss::RssSeen,
     /// last successful poll time per feed url
     rss_last_polled: std::collections::HashMap<String, Instant>,
+    /// info_hashes of torrents we've already acted on for seed limits, so we
+    /// don't repeatedly pause/remove on every poll tick
+    seed_limit_acted: std::collections::HashSet<String>,
 }
 
 impl App {
@@ -92,7 +95,7 @@ impl App {
                 .unwrap_or_else(Instant::now);
             rss_last_polled.insert(feed.url.clone(), ago);
         }
-        Ok(Self { session, torrents: Vec::new(), config, categories, tag_rules, rss_feeds, rss_seen, rss_last_polled })
+        Ok(Self { session, torrents: Vec::new(), config, categories, tag_rules, rss_feeds, rss_seen, rss_last_polled, seed_limit_acted: std::collections::HashSet::new() })
     }
 
     /// load saved torrent list and resume each one with its fastresume data
@@ -323,6 +326,12 @@ impl App {
             }
             "seed_ratio_limit" | "ratio_limit" => self.config.seed_ratio_limit = value.parse()?,
             "seed_time_limit" | "time_limit" => self.config.seed_time_limit = value.parse()?,
+            "seed_ratio_action" => {
+                if (!matches!(value, "pause" | "remove")) {
+                    return Err(anyhow::anyhow!("seed_ratio_action must be: pause | remove"));
+                }
+                self.config.seed_ratio_action = value.to_string();
+            }
             "ssrf_mitigation" => self.config.ssrf_mitigation = parse_bool(value),
             "validate_https_tracker_certificate" | "validate_https" => {
                 self.config.validate_https_tracker_certificate = parse_bool(value);
@@ -749,6 +758,45 @@ impl App {
         }
     }
 
+    /// check all seeding torrents against ratio/time limits and pause or
+    /// remove them when a limit is hit. each torrent is only acted on once
+    /// (tracked in `seed_limit_acted`) — manual resume clears the entry.
+    pub fn check_seed_limits(&mut self) {
+        let ratio_limit = self.config.seed_ratio_limit;
+        let time_limit = self.config.seed_time_limit;
+        if (ratio_limit <= 0.0 && time_limit <= 0) { return; }
+
+        let action = self.config.seed_ratio_action.clone();
+        // collect indices to act on to avoid holding borrows across the action calls
+        let mut to_act: Vec<(usize, String)> = Vec::new();
+
+        for (index, torrent) in self.torrents.iter().enumerate() {
+            let status = torrent.handle.status();
+            if (!status.is_seeding || status.is_paused) { continue; }
+            if (self.seed_limit_acted.contains(&torrent.info_hash)) { continue; }
+
+            let ratio_hit = ratio_limit > 0.0 && status.ratio >= ratio_limit;
+            let time_hit = time_limit > 0 && status.seeding_time >= (time_limit as i64) * 60;
+            if (ratio_hit || time_hit) {
+                to_act.push((index, torrent.info_hash.clone()));
+            }
+        }
+
+        for (index, info_hash) in to_act {
+            self.seed_limit_acted.insert(info_hash.clone());
+            if (action == "remove") {
+                tracing::info!(index, hash = %info_hash, "seed limit hit — removing");
+                let _ = self.remove(index, false);
+            } else {
+                tracing::info!(index, hash = %info_hash, "seed limit hit — pausing");
+                if let Some(torrent) = self.torrents.get(index) {
+                    torrent.handle.pause();
+                    torrent.handle.submit_save_resume_data();
+                }
+            }
+        }
+    }
+
     /// submit an async save_resume_data for every torrent that has metadata.
     /// the resulting blobs arrive via `save_resume_data_alert` and are written
     /// to disk by `drain_pending_resume_data`.
@@ -849,7 +897,13 @@ impl App {
             },
             Request::Resume { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
-                Some(torrent) => { torrent.handle.resume(); torrent.handle.submit_save_resume_data(); Response::Ok }
+                Some(torrent) => {
+                    // clear so check_seed_limits doesn't immediately re-pause
+                    self.seed_limit_acted.remove(&torrent.info_hash.clone());
+                    torrent.handle.resume();
+                    torrent.handle.submit_save_resume_data();
+                    Response::Ok
+                }
             },
             Request::Recheck { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
@@ -1599,6 +1653,7 @@ pub fn run(quiet: bool) -> Result<()> {
 
         if (last_watch_scan.elapsed() >= WATCH_SCAN_INTERVAL) {
             app.poll_watch_dirs();
+            app.check_seed_limits();
             last_watch_scan = Instant::now();
         }
 
