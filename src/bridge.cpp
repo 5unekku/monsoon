@@ -575,6 +575,7 @@ void bridge_torrent_set_sequential(const lt::torrent_handle &hdl, bool enabled) 
     else hdl.unset_flags(lt::torrent_flags::sequential_download);
 }
 
+// TODO: libtorrent 2.1 adds lt::torrent_flags::download_first_last_pieces — replace this with set_flags/unset_flags when we upgrade
 void bridge_torrent_set_first_last_prio(const lt::torrent_handle &hdl, bool enabled) {
     if (!hdl.is_valid()) return;
     auto ti = hdl.torrent_file();
