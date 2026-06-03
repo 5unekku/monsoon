@@ -7,7 +7,7 @@
 
 [Unit]
 Description=monsoon torrent daemon
-Documentation=https://codeberg.org/5unekku/monsoon
+Documentation=https://gitlab.com/5unekku/monsoon
 After=network.target
 
 [Service]
