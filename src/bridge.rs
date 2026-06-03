@@ -243,6 +243,9 @@ pub mod ffi {
         // toggle the sequential_download flag at runtime
         pub fn bridge_torrent_set_sequential(hdl: &torrent_handle, enabled: bool);
 
+        // boost (or clear) first/last piece priority for all files
+        pub fn bridge_torrent_set_first_last_prio(hdl: &torrent_handle, enabled: bool);
+
         /// bind this torrent's outgoing connections to a specific interface
         /// (e.g. "tun0" or an ip). pass empty to clear and use the session default.
         pub fn bridge_torrent_use_interface(hdl: &torrent_handle, interface: &str);

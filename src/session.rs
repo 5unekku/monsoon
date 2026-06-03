@@ -188,6 +188,10 @@ impl TorrentHandle {
         ffi::bridge_torrent_set_sequential(&self.inner, enabled);
     }
 
+    pub fn set_first_last_prio(&self, enabled: bool) {
+        ffi::bridge_torrent_set_first_last_prio(&self.inner, enabled);
+    }
+
     pub fn use_interface(&self, interface: &str) {
         ffi::bridge_torrent_use_interface(&self.inner, interface);
     }

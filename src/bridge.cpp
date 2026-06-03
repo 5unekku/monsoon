@@ -575,6 +575,24 @@ void bridge_torrent_set_sequential(const lt::torrent_handle &hdl, bool enabled) 
     else hdl.unset_flags(lt::torrent_flags::sequential_download);
 }
 
+void bridge_torrent_set_first_last_prio(const lt::torrent_handle &hdl, bool enabled) {
+    if (!hdl.is_valid()) return;
+    auto ti = hdl.torrent_file();
+    if (!ti) return;
+    const auto &fs = ti->files();
+    auto prio = enabled ? lt::download_priority_t{7} : lt::download_priority_t{4};
+    int piece_size = ti->piece_length();
+    for (auto fi = lt::file_index_t{0}; fi < lt::file_index_t{fs.num_files()}; ++fi) {
+        if (fs.file_size(fi) == 0) continue;
+        int64_t offset = fs.file_offset(fi);
+        int64_t end = offset + fs.file_size(fi) - 1;
+        auto first_piece = lt::piece_index_t{static_cast<int>(offset / piece_size)};
+        auto last_piece  = lt::piece_index_t{static_cast<int>(end   / piece_size)};
+        hdl.piece_priority(first_piece, prio);
+        if (last_piece != first_piece) hdl.piece_priority(last_piece, prio);
+    }
+}
+
 void bridge_torrent_use_interface(const lt::torrent_handle &hdl, rust::Str interface) {
     if (!hdl.is_valid()) return;
     // libtorrent expects a comma-separated list, empty clears the per-torrent override

@@ -2251,8 +2251,8 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         };
         if (added_id.is_none()) { continue; }
         succeeded += 1;
-        // do the List roundtrip whenever we need the new index (sequential or paused)
-        if (options.sequential || !options.start) {
+        // do the List roundtrip whenever we need the new index
+        if (options.sequential || options.first_last || !options.start) {
             let new_index = match client::send(Request::List) {
                 Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
                 _ => continue,
@@ -2260,12 +2260,14 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
             if (options.sequential) {
                 let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
             }
+            if (options.first_last) {
+                let _ = client::send(Request::SetFirstLastPriority { index: new_index, enabled: true });
+            }
             if (!options.start) {
                 paused_indices.push(new_index);
                 paused_entries.push(uri.clone());
             }
         }
-        if (options.first_last) { todo!("first/last piece priority") }
         if (!matches!(options.subfolder, SubfolderMode::Default)) { todo!("subfolder mode") }
     }
     if (failures.is_empty()) {

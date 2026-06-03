@@ -1041,6 +1041,10 @@ impl App {
                 None => Response::Err(format!("invalid index: {}", index)),
                 Some(torrent) => { torrent.handle.set_sequential(enabled); Response::Ok }
             },
+            Request::SetFirstLastPriority { index, enabled } => match self.torrents.get(index) {
+                None => Response::Err(format!("invalid index: {}", index)),
+                Some(torrent) => { torrent.handle.set_first_last_prio(enabled); Response::Ok }
+            },
             Request::SetTags { index, tags } => match self.torrents.get_mut(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
                 Some(torrent) => {

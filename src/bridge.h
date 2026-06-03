@@ -107,6 +107,9 @@ namespace rustbridge {
     // toggle the sequential_download flag at runtime (front-to-back piece order)
     void bridge_torrent_set_sequential(const torrent_handle &hdl, bool enabled);
 
+    // boost (or clear) the priority of the first and last pieces of every file
+    void bridge_torrent_set_first_last_prio(const torrent_handle &hdl, bool enabled);
+
     // bind this torrent's outgoing connections to a specific interface
     void bridge_torrent_use_interface(const torrent_handle &hdl, rust::Str interface);
 

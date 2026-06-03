@@ -129,6 +129,8 @@ pub enum Request {
     Magnet { index: usize },
     /// toggle the sequential-download flag (front-to-back piece order)
     SetSequential { index: usize, enabled: bool },
+    /// boost the first and last pieces of every file to highest priority
+    SetFirstLastPriority { index: usize, enabled: bool },
     /// replace the tag set on a torrent
     SetTags { index: usize, tags: BTreeSet<String> },
     /// set or clear the category on a torrent. `None` clears it.
