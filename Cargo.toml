@@ -1,6 +1,6 @@
 [package]
 name = "monsoon"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "torrent client daemon and cli, built on libtorrent-rasterbar"
 license = "GPL-3.0-only"
