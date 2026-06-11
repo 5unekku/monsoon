@@ -635,6 +635,17 @@ const SETTING_FIELDS: &[SettingField] = &[
         restart_required: false,
         is_list: true,
     },
+
+    // ── general ──
+    SettingField {
+        section: "general",
+        key: "autostart",
+        label: "start on login",
+        description: "launch the monsoon daemon automatically when you log in. on linux, registers with the running init system (systemd, runit, or dinit) or falls back to an xdg .desktop entry. on windows, adds a registry run key.",
+        kind: FieldKind::Bool,
+        restart_required: false,
+        is_list: false,
+    },
 ];
 
 fn config_value_string(config: &Config, key: &str) -> String {
@@ -670,6 +681,7 @@ fn config_value_string(config: &Config, key: &str) -> String {
         "proxy_password" => config.proxy_password.clone(),
         "proxy_peer_connections" => config.proxy_peer_connections.to_string(),
         "proxy_tracker_connections" => config.proxy_tracker_connections.to_string(),
+        "autostart" => crate::autostart::is_enabled().to_string(),
         _ => String::new(),
     }
 }
@@ -4915,6 +4927,14 @@ fn commit_edit(settings: &mut SettingsState, buffer: &str) {
 }
 
 fn commit_value(settings: &mut SettingsState, key: &str, value: &str) {
+    if key == "autostart" {
+        let result = if value == "true" { crate::autostart::enable() } else { crate::autostart::disable() };
+        settings.status = Some(match result {
+            Ok(_) => format!("autostart {}", if value == "true" { "enabled" } else { "disabled" }),
+            Err(error) => format!("error: {}", error),
+        });
+        return;
+    }
     match submit_set(key, value) {
         Ok(_) => {
             settings.status = Some(format!("saved {} = {}", key, value));
