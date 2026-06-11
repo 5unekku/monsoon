@@ -8,7 +8,6 @@ fn main() {
         .file("src/bridge.cpp")
         .flag_if_supported("-std=c++17")
         .flag_if_supported("-Wno-maybe-uninitialized")
-        .include("/usr/include")
         .include(&src_dir)
         .compile("monsoon-bridge");
 

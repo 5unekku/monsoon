@@ -3,6 +3,7 @@ use crate::ipc::{Request, Response};
 use anyhow::{Context, Result};
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::Arc;
@@ -14,46 +15,53 @@ const SPAWN_MAX_RETRIES: u32 = 40; // 2 second total
 /// Check if the local daemon is already running and actively accepting connections
 #[allow(dead_code)]
 pub fn is_local_daemon_running() -> bool {
+    #[cfg(unix)]
     if let Ok(socket_path) = Config::socket_path() {
-        UnixStream::connect(&socket_path).is_ok()
-    } else {
-        false
+        return UnixStream::connect(&socket_path).is_ok();
     }
+    false
 }
 
 /// send a request to the daemon, auto-spawning it silently if not running
 pub fn send(request: Request) -> Result<Response> {
-    let socket_path = Config::socket_path()?;
+    #[cfg(not(unix))]
+    { anyhow::bail!("local socket not available on this platform; use --server <host:port>") }
 
-    // try to connect; if it fails, spawn the daemon quietly and retry
-    let mut stream = match UnixStream::connect(&socket_path) {
-        Ok(s) => s,
-        Err(_) => {
-            if socket_path.exists() {
-                // remove stale socket path from a previous crash before spawning
-                let _ = std::fs::remove_file(&socket_path);
+    #[cfg(unix)]
+    {
+        let socket_path = Config::socket_path()?;
+
+        // try to connect; if it fails, spawn the daemon quietly and retry
+        let mut stream = match UnixStream::connect(&socket_path) {
+            Ok(s) => s,
+            Err(_) => {
+                if socket_path.exists() {
+                    // remove stale socket path from a previous crash before spawning
+                    let _ = std::fs::remove_file(&socket_path);
+                }
+                spawn_daemon_quiet()?;
+                wait_for_socket(&socket_path)?;
+                UnixStream::connect(&socket_path).context("connect to self-spawned daemon")?
             }
-            spawn_daemon_quiet()?;
-            wait_for_socket(&socket_path)?;
-            UnixStream::connect(&socket_path).context("connect to self-spawned daemon")?
-        }
-    };
+        };
 
-    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
-    let json = serde_json::to_string(&request).context("serialize request")?;
-    stream.write_all(json.as_bytes())?;
-    stream.write_all(b"\n")?;
-    stream.flush()?;
+        let json = serde_json::to_string(&request).context("serialize request")?;
+        stream.write_all(json.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
 
-    let mut reader = BufReader::new(&stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).context("read response")?;
+        let mut reader = BufReader::new(&stream);
+        let mut line = String::new();
+        reader.read_line(&mut line).context("read response")?;
 
-    serde_json::from_str(line.trim()).context("parse response")
+        serde_json::from_str(line.trim()).context("parse response")
+    }
 }
 
+#[cfg(unix)]
 fn spawn_daemon_quiet() -> Result<()> {
     let binary = std::env::current_exe().context("locate current binary")?;
     // new process group so the child survives terminal close
@@ -171,6 +179,7 @@ fn rustls_client_config_insecure() -> rustls::ClientConfig {
         .with_no_client_auth()
 }
 
+#[cfg(unix)]
 fn wait_for_socket(socket_path: &Path) -> Result<()> {
     for _ in 0..SPAWN_MAX_RETRIES {
         std::thread::sleep(Duration::from_millis(SPAWN_WAIT_MS));

@@ -34,10 +34,15 @@ if-addrs = "0.13"
 curl = "0.4"
 quick-xml = "0.37"
 regex = "1"
-arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 
 [build-dependencies]
 cxx-build = "1.0"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+arboard = { version = "3", default-features = false }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
@@ -45,3 +50,20 @@ winreg = "0.56.0"
 
 [package.metadata.cargo-machete]
 ignored = ["cxx-build"]
+
+[package.metadata.deb]
+maintainer = "5unekku <jimmy.bungalo8@gmail.com>"
+depends = "$auto"
+section = "net"
+assets = [
+    ["target/release/monsoon", "usr/bin/monsoon", "755"],
+    ["contrib/systemd/monsoon.service", "lib/systemd/user/monsoon.service", "644"],
+    ["contrib/monsoon.desktop", "usr/share/applications/monsoon.desktop", "644"],
+]
+
+[package.metadata.generate-rpm]
+assets = [
+    { source = "target/release/monsoon", dest = "/usr/bin/monsoon", mode = "755" },
+    { source = "contrib/systemd/monsoon.service", dest = "/usr/lib/systemd/user/monsoon.service", mode = "644" },
+    { source = "contrib/monsoon.desktop", dest = "/usr/share/applications/monsoon.desktop", mode = "644" },
+]

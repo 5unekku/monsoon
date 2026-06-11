@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{
     Arc,
@@ -1491,6 +1492,7 @@ fn check_rename_collision(
     Ok(())
 }
 
+#[cfg(unix)]
 fn handle_connection(app: &mut App, stream: UnixStream) -> Result<bool> {
     let mut reader = BufReader::new(&stream);
     let mut line = String::new();
@@ -1673,15 +1675,22 @@ pub fn run(quiet: bool) -> Result<()> {
         );
     }
 
-    let socket_path = Config::socket_path().context("socket path")?;
-    // remove any stale socket from a previous crash
-    let _ = std::fs::remove_file(&socket_path);
+    #[cfg(unix)]
+    let socket_path = {
+        let p = Config::socket_path().context("socket path")?;
+        let _ = std::fs::remove_file(&p);
+        p
+    };
 
     let mut app = App::new(config.clone()).context("create session")?;
     app.install_ip_filter();
 
-    let listener = UnixListener::bind(&socket_path).context("bind socket")?;
-    listener.set_nonblocking(true).context("set nonblocking")?;
+    #[cfg(unix)]
+    let listener = {
+        let l = UnixListener::bind(&socket_path).context("bind socket")?;
+        l.set_nonblocking(true).context("set nonblocking")?;
+        l
+    };
 
     // optional TLS-only TCP listener for remote control. when configured,
     // we ensure cert+token exist, persist them, and start accepting.
@@ -1695,17 +1704,25 @@ pub fn run(quiet: bool) -> Result<()> {
 
     // socket is up and pidfile is written — tell systemd we're ready now so
     // startup doesn't block on torrent loading. resume data loads below.
+    #[cfg(unix)]
     notify_systemd_ready();
 
     if let Err(error) = app.load_torrents() {
         tracing::warn!("could not restore saved torrents: {}", error);
     }
 
+    #[cfg(unix)]
     tracing::info!(
         socket = %socket_path.display(),
         pidfile = %pidfile_path.display(),
         libtorrent = %crate::session::libtorrent_version(),
         "daemon started"
+    );
+    #[cfg(not(unix))]
+    tracing::info!(
+        pidfile = %pidfile_path.display(),
+        libtorrent = %crate::session::libtorrent_version(),
+        "daemon started (tcp-only; local socket not available on this platform)"
     );
 
     let mut last_alert_check = Instant::now();
@@ -1763,6 +1780,7 @@ pub fn run(quiet: bool) -> Result<()> {
             }
         }
 
+        #[cfg(unix)]
         match listener.accept() {
             Ok((stream, _)) => {
                 match handle_connection(&mut app, stream) {
@@ -1776,6 +1794,9 @@ pub fn run(quiet: bool) -> Result<()> {
             }
             Err(error) => return Err(error.into()),
         }
+        // on non-unix there is no local socket; throttle the poll loop
+        #[cfg(not(unix))]
+        std::thread::sleep(Duration::from_millis(50));
 
         // network listener — accept one connection per loop tick, with full
         // tls handshake + AUTH gate happening on this thread. heavy clients
@@ -1812,6 +1833,7 @@ pub fn run(quiet: bool) -> Result<()> {
         app.drain_pending_resume_data();
         std::thread::sleep(Duration::from_millis(100));
     }
+    #[cfg(unix)]
     let _ = std::fs::remove_file(&socket_path);
     let _ = std::fs::remove_file(&pidfile_path);
     Ok(())
@@ -1819,6 +1841,7 @@ pub fn run(quiet: bool) -> Result<()> {
 
 /// notify systemd that the daemon is ready, when launched under Type=notify.
 /// pure no-op on systems without NOTIFY_SOCKET set.
+#[cfg(unix)]
 fn notify_systemd_ready() {
     let socket_path = match std::env::var("NOTIFY_SOCKET") {
         Ok(value) if !value.is_empty() => value,
