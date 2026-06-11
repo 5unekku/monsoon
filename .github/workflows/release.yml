@@ -77,8 +77,8 @@ jobs:
             | awk '/\/mingw64\/bin\// { print $3 }' \
             | while IFS= read -r dll; do cp "$dll" installer/; done
 
-      - name: portable zip
-        run: Compress-Archive -Path installer\* -DestinationPath "monsoon-${{ github.ref_name }}-x86_64-windows-portable.zip"
+      - name: portable archive
+        run: 7z a -mx=5 "monsoon-${{ github.ref_name }}-x86_64-windows-portable.7z" .\installer\*
         shell: powershell
 
       - name: build msi
@@ -107,7 +107,7 @@ jobs:
         with:
           name: windows-packages
           path: |
-            monsoon-*-x86_64-windows-portable.zip
+            monsoon-*-x86_64-windows-portable.7z
             monsoon-*-x86_64-windows.msi
 
   release:
@@ -132,5 +132,5 @@ jobs:
             --draft \
             artifacts/*.deb \
             artifacts/*.rpm \
-            artifacts/monsoon-*-x86_64-windows-portable.zip \
+            artifacts/monsoon-*-x86_64-windows-portable.7z \
             artifacts/monsoon-*-x86_64-windows.msi
