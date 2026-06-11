@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use crate::config::Config;
 use crate::ipc::{Request, Response};
 use anyhow::{Context, Result};
@@ -5,6 +6,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(unix)]
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +25,7 @@ pub fn is_local_daemon_running() -> bool {
 }
 
 /// send a request to the daemon, auto-spawning it silently if not running
-pub fn send(request: Request) -> Result<Response> {
+pub fn send(_request: Request) -> Result<Response> {
     #[cfg(not(unix))]
     { anyhow::bail!("local socket not available on this platform; use --server <host:port>") }
 
@@ -48,7 +50,7 @@ pub fn send(request: Request) -> Result<Response> {
         stream.set_write_timeout(Some(Duration::from_secs(5)))?;
         stream.set_read_timeout(Some(Duration::from_secs(30)))?;
 
-        let json = serde_json::to_string(&request).context("serialize request")?;
+        let json = serde_json::to_string(&_request).context("serialize request")?;
         stream.write_all(json.as_bytes())?;
         stream.write_all(b"\n")?;
         stream.flush()?;

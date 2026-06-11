@@ -27,7 +27,7 @@ pub fn is_alive(pid: i32) -> bool {
     
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
-        if handle == 0 {
+        if handle == std::ptr::null_mut() {
             return false;
         }
         let wait_res = WaitForSingleObject(handle, 0);
@@ -43,7 +43,7 @@ pub fn terminate(pid: i32) -> Result<()> {
     
     unsafe {
         let handle = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
-        if handle == 0 {
+        if handle == std::ptr::null_mut() {
             anyhow::bail!("failed to open process {}", pid);
         }
         let res = TerminateProcess(handle, 1);

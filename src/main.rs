@@ -502,14 +502,14 @@ fn command_to_request(command: Commands) -> Request {
     }
 }
 
-fn run_service_command(action: ServiceAction) -> Result<()> {
+fn run_service_command(_action: ServiceAction) -> Result<()> {
     #[cfg(not(target_os = "linux"))]
     {
         anyhow::bail!("systemd service management is only supported on Linux");
     }
     #[cfg(target_os = "linux")]
     {
-        match action {
+        match _action {
             ServiceAction::Install => install_service(),
             ServiceAction::Uninstall => uninstall_service(),
             // systemctl status returns 3 when the unit is inactive; that's not an
