@@ -68,39 +68,40 @@ jobs:
         shell: msys2 {0}
         run: cargo build --release
 
-      - name: collect installer files
+      - name: collect dlls
         shell: msys2 {0}
         run: |
           mkdir -p installer
-          cp target/release/monsoon.exe installer/
           ntldd -R target/release/monsoon.exe \
             | awk '/\/mingw64\/bin\// { print $3 }' \
             | while IFS= read -r dll; do cp "$dll" installer/; done
-
-      - name: portable archive
-        run: 7z a -mx=5 "monsoon-${{ github.ref_name }}-x86_64-windows-portable.7z" .\installer\*
-        shell: powershell
 
       - name: build msi
         run: |
           $tag = "${{ github.ref_name }}"
           $version = $tag -replace '^v', ''
-          # harvest bundled dlls into a wix fragment
+          # heat runs before the exe is present so it only harvests dlls (avoids ICE30)
           heat dir installer `
             -o wix\dlls.wxs `
             -cg DllFiles `
             -dr INSTALLFOLDER `
             -var var.InstallerDir `
             -gg -gl -scom -sreg -srd
-          # compile + link
+          Copy-Item target\release\monsoon.exe installer\
           candle -arch x64 `
             -dProductVersion="$version" `
             -dInstallerDir=installer `
             wix\main.wxs wix\dlls.wxs `
             -out wix\
+          # ICE38/ICE64/ICE91 are WiX 3 false positives for perUser installs
           light wix\main.wixobj wix\dlls.wixobj `
             -ext WixUIExtension `
+            -sice:ICE38 -sice:ICE64 -sice:ICE91 `
             -out "monsoon-$tag-x86_64-windows.msi"
+        shell: powershell
+
+      - name: portable archive
+        run: 7z a -mx=5 "monsoon-${{ github.ref_name }}-x86_64-windows-portable.7z" .\installer\*
         shell: powershell
 
       - uses: actions/upload-artifact@v4
