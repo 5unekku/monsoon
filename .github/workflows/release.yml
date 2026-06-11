@@ -73,8 +73,9 @@ jobs:
         run: |
           mkdir -p installer
           ntldd -R target/release/monsoon.exe \
-            | awk '/\/mingw64\/bin\// { print $3 }' \
-            | while IFS= read -r dll; do cp "$dll" installer/; done
+            | grep -i 'mingw64' \
+            | awk '{ print $3 }' \
+            | while IFS= read -r dll; do cp "$(cygpath -u "$dll")" installer/; done
 
       - name: build msi
         run: |
