@@ -684,6 +684,7 @@ impl App {
         index: usize,
         old_prefix: &str,
         new_prefix: &str,
+        decisions: Option<crate::ipc::RenameDecisions>,
     ) -> Result<crate::ipc::Response> {
         use crate::ipc::Response;
 
@@ -766,21 +767,88 @@ impl App {
             filtered_plan.push((file_index, new_path));
         }
 
-        // atomic semantics: if anything was rejected, don't submit any renames
+        // file-on-file conflicts are never auto-merged. reject the whole
+        // operation and tell the user to rename the conflicting file first.
         if (!rejected.is_empty()) {
+            let rejected = rejected.into_iter()
+                .map(|(file_index, reason)| (file_index, format!("{} — rename that file manually, then retry the merge", reason)))
+                .collect();
             return Ok(Response::RenameResult { renamed: Vec::new(), rejected });
+        }
+
+        let tracked: std::collections::HashSet<String> = files.iter().map(|file| file.path.clone()).collect();
+        let save_root = std::path::Path::new(&torrent.save_path);
+
+        let merge_same = folder_merge_same(&static_files.iter().map(|s| s.to_string()).collect::<Vec<_>>(), trimmed_new);
+
+        let dest_dir = save_root.join(trimmed_new);
+        let unrelated_in_dest = scan_unrelated_in_dir(&dest_dir, &tracked, save_root);
+        let merge_unrelated = !unrelated_in_dest.is_empty();
+
+        let source_dir = save_root.join(trimmed_old);
+        let untracked_in_source = scan_unrelated_in_dir(&source_dir, &tracked, save_root);
+
+        let mut needs: Vec<crate::ipc::RenameConcern> = Vec::new();
+        let mut approved_merge_same = true;
+        let mut approved_merge_unrelated = true;
+        let mut untracked_choice = crate::ipc::UntrackedChoice::Leave;
+
+        if (merge_same) {
+            match (self.config.rename_merge_same.as_str(), decisions) {
+                ("always", _) => {}
+                (_, Some(d)) => approved_merge_same = d.merge_same,
+                (_, None) => needs.push(crate::ipc::RenameConcern::MergeSame),
+            }
+        }
+        if (merge_unrelated) {
+            match (self.config.rename_merge_unrelated.as_str(), decisions) {
+                ("always", _) => {}
+                (_, Some(d)) => approved_merge_unrelated = d.merge_unrelated,
+                (_, None) => needs.push(crate::ipc::RenameConcern::MergeUnrelated { unrelated_count: unrelated_in_dest.len() }),
+            }
+        }
+        if (!untracked_in_source.is_empty()) {
+            match (self.config.rename_untracked_files.as_str(), decisions) {
+                ("always_move", _) => untracked_choice = crate::ipc::UntrackedChoice::Move,
+                ("always_leave", _) => untracked_choice = crate::ipc::UntrackedChoice::Leave,
+                (_, Some(d)) => untracked_choice = d.untracked,
+                (_, None) => needs.push(crate::ipc::RenameConcern::UntrackedFiles { count: untracked_in_source.len() }),
+            }
+        }
+
+        if (!needs.is_empty()) {
+            return Ok(Response::RenameConfirmation { concerns: needs });
+        }
+        // a declined merge cancels the whole operation
+        if ((merge_same && !approved_merge_same) || (merge_unrelated && !approved_merge_unrelated)) {
+            return Ok(Response::RenameResult { renamed: Vec::new(), rejected: vec![(0, "rename cancelled".to_string())] });
+        }
+
+        // move untracked files first (independent of libtorrent's async renames)
+        if (matches!(untracked_choice, crate::ipc::UntrackedChoice::Move)) {
+            let _ = std::fs::create_dir_all(&dest_dir);
+            for source in &untracked_in_source {
+                if let Ok(relative) = source.strip_prefix(&source_dir) {
+                    let target = dest_dir.join(relative);
+                    if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
+                    if let Err(error) = std::fs::rename(source, &target) {
+                        tracing::warn!(source = %source.display(), "untracked move failed: {}", error);
+                    }
+                }
+            }
         }
 
         let mut renamed: Vec<usize> = Vec::new();
         for (file_index, new_path) in filtered_plan {
             torrent.handle.rename_file(file_index as i32, &new_path);
-            tracing::info!(
-                torrent = %torrent.info_hash, file_index, new_name = %new_path,
-                "submitted rename (folder)"
-            );
+            tracing::info!(torrent = %torrent.info_hash, file_index, new_name = %new_path, "submitted rename (folder)");
             renamed.push(file_index);
         }
-        Ok(Response::RenameResult { renamed, rejected })
+        // best-effort: the now-empty source dir is removed opportunistically;
+        // libtorrent's renames complete asynchronously, so this may fail the
+        // first time and is retried by a later rename or left to the user.
+        let _ = std::fs::remove_dir(&source_dir);
+        Ok(Response::RenameResult { renamed, rejected: Vec::new() })
     }
 
     /// load an ip filter (PeerGuardian or CIDR) from disk if configured.
@@ -1068,12 +1136,11 @@ impl App {
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
-            Request::RenameFolder { index, old_prefix, new_prefix, decisions: _ } => {
-                match self.rename_folder(index, &old_prefix, &new_prefix) {
+            Request::RenameFolder { index, old_prefix, new_prefix, decisions } =>
+                match self.rename_folder(index, &old_prefix, &new_prefix, decisions) {
                     Ok(response) => response,
                     Err(error) => Response::Err(error.to_string()),
-                }
-            }
+                },
             Request::Move { index, new_save_path, decisions: _ } => match self.move_storage(index, &new_save_path) {
                 Ok(_) => Response::Ok,
                 Err(error) => Response::Err(error.to_string()),
