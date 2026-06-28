@@ -127,12 +127,27 @@ path equals the name. So only two transforms are ever non-trivial:
 - **Never** — strip a leading `"<name>/"` from every file path. Affects multi-file torrents
   (files move directly into the save path, inner structure preserved); single-file paths have no
   such prefix, so it is a no-op.
-- **Always** — ensure a folder named after the torrent. Multi-file already has it (no-op); a
-  single-file torrent's lone file `name` is renamed to `"<name>/<name>"` (see open questions —
-  for a single file the torrent name *is* the filename).
+- **Always** — ensure the content sits in a folder. Multi-file torrents already have their root
+  folder, so this is a **no-op** (Always adds a folder when one is absent; it does not rename an
+  existing root folder). A single-file torrent's lone file is renamed from `<filename>` to
+  `"<torrent name>/<filename>"`, where **torrent name** is the effective display name
+  (`display_name` if set via `RenameTorrent`, else libtorrent's metadata `status.name`; see
+  `src/server.rs:1229`), sanitized to a single safe path component, and **filename** is the
+  basename of the file. The two can differ (a renamed torrent, or a magnet `dn`), so the result
+  is `name/filename` — **not** necessarily `name/name`.
 - **IfMultiple** — the torrent's natural layout already satisfies this (multi-file has a root
   folder, single-file does not), so it is a **no-op in all cases**. It exists as the safe default
   and is the value `Default` usually resolves to.
+
+**Concrete examples** (file shown as `movie.mkv`, torrent name as `Name`):
+
+| Torrent                          | Default / IfMultiple | Always            | Never        |
+|----------------------------------|----------------------|-------------------|--------------|
+| single-file, file `movie.mkv`    | `movie.mkv`          | `Name/movie.mkv`  | `movie.mkv`  |
+| multi-file under `Name/`         | `Name/movie.mkv`     | `Name/movie.mkv`  | `movie.mkv`  |
+
+(`Never` on a single-file torrent and `Always` on a multi-file torrent are both no-ops — the file
+is already where that layout would put it.)
 
 Apply by issuing `handle.rename_file(i, new_path)` for each file whose path changes, then clear
 `pending_layout`. The existing alert loop already logs `file_renamed_alert` /
@@ -325,14 +340,12 @@ drop the dead path while keeping the `security-anonymity-priorities` memory poin
     message; untracked move/leave behaves; `Always…` choices persist to config; move honors the
     same rules.
 
-## Open questions
-
-- **Single-file `Always`.** A single-file torrent's name *is* its filename, so wrapping yields
-  `"<name>/<name>"` (e.g. `movie.mkv/movie.mkv`). Default plan: do exactly that (literally
-  "a folder named after the torrent"). Alternative: strip the extension for the folder
-  (`movie/movie.mkv`). Pick before implementing B3.
-
 ## Risks / notes
+
+- The folder name for single-file `Always` comes from the torrent's display name, which is
+  user-controllable (`RenameTorrent`) and from magnet `dn`; it **must be sanitized** to a single
+  safe path component (reject/strip `/`, `..`, null, leading/trailing dots-or-spaces) before being
+  used as an on-disk directory.
 
 - The B3 trigger relies on `torrent_checked_alert`; if the bridge doesn't surface it, that's a
   small bridge addition (see B3 implementation dependency). The per-torrent latch
