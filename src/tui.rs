@@ -2944,7 +2944,7 @@ fn draw_feeds(frame: &mut ratatui::Frame, state: &mut AppState) {
         Constraint::Min(20),
     ])
     .header(header)
-    .row_highlight_style(Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD))
+    .row_highlight_style(selected_row_style())
     .block(Block::default().borders(Borders::NONE));
 
     frame.render_stateful_widget(table, layout[1], &mut feeds.table_state);
@@ -3424,7 +3424,7 @@ fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
 
         let table = Table::new(rows, widths)
             .header(header)
-            .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+            .row_highlight_style(selected_row_style())
             .highlight_symbol("▌ ");
 
         frame.render_stateful_widget(table, layout[2], &mut step.files_state);
@@ -3864,6 +3864,13 @@ fn focus_border_style(focused: bool) -> Style {
     }
 }
 
+/// selection highlight used by every selectable table. forces an explicit
+/// fg+bg so rows greyed out via fg(DarkGray) (paused torrents, skip-priority
+/// files) stay legible when selected instead of going DarkGray-on-DarkGray.
+fn selected_row_style() -> Style {
+    Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)
+}
+
 fn draw_title(frame: &mut ratatui::Frame, area: Rect) {
     let title = Line::from(vec![
         Span::styled(
@@ -4131,7 +4138,7 @@ fn draw_torrent_list(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     let constraints: Vec<Constraint> = widths.iter().map(|w| Constraint::Length(*w)).collect();
     let table = Table::new(rows, constraints)
         .column_spacing(1)
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD));
+        .row_highlight_style(selected_row_style());
     frame.render_stateful_widget(table, data_area, &mut state.table_state);
 }
 
@@ -4450,7 +4457,7 @@ fn draw_content_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState
 
     let table = Table::new(rows, widths)
         .header(header)
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .row_highlight_style(selected_row_style())
         .highlight_symbol("▌ ");
 
     frame.render_stateful_widget(table, area, &mut state.detail_files_state);
@@ -4500,7 +4507,7 @@ fn draw_peers_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppState) 
 
     let table = Table::new(rows, widths)
         .header(header)
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .row_highlight_style(selected_row_style())
         .highlight_symbol("▌ ");
 
     frame.render_stateful_widget(table, area, &mut state.detail_peers_state);
@@ -4558,7 +4565,7 @@ fn draw_trackers_tab(frame: &mut ratatui::Frame, area: Rect, state: &mut AppStat
     ];
     let table = Table::new(rows, widths)
         .header(header)
-        .row_highlight_style(Style::default().bg(Color::DarkGray).add_modifier(Modifier::BOLD))
+        .row_highlight_style(selected_row_style())
         .highlight_symbol("▌ ");
     frame.render_stateful_widget(table, area, &mut state.detail_trackers_state);
 }
