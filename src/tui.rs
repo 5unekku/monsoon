@@ -961,6 +961,20 @@ enum PromptAction {
     AddTracker,
 }
 
+/// in-flight rename/move awaiting per-concern confirmation from the user.
+/// once the concern queue drains, the original request is resent with
+/// decisions filled in.
+struct RenameConfirm {
+    kind: RenameConfirmKind,
+    concerns: std::collections::VecDeque<crate::ipc::RenameConcern>,
+    decisions: crate::ipc::RenameDecisions,
+}
+
+enum RenameConfirmKind {
+    Folder { index: usize, old_prefix: String, new_prefix: String },
+    Move { index: usize, new_save_path: String },
+}
+
 /// a single row in the sidebar flat list. headers are visual separators;
 /// selecting one is a no-op. selectable items set the active filter.
 #[derive(Clone, PartialEq)]
@@ -1109,6 +1123,8 @@ impl PriorityStep {
 struct AppState {
     mode: Mode,
     prompt: Option<Prompt>,
+    /// sequential rename/move confirmation flow; shown as an overlay
+    rename_confirm: Option<RenameConfirm>,
     /// add-options form opened after the multi-line add prompt is confirmed
     add_options: Option<AddOptionsForm>,
     /// post-add file priority step. opened when torrents are added paused.
@@ -1236,6 +1252,7 @@ impl AppState {
         Self {
             mode: Mode::Main,
             prompt: None,
+            rename_confirm: None,
             add_options: None,
             priority_step: None,
             active_input: None,
@@ -1512,6 +1529,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_options.is_some()) {
                         handle_add_options_key(key.code, key.modifiers, &mut state)
+                    } else if (state.rename_confirm.is_some()) {
+                        handle_rename_confirm_key(key.code, &mut state);
+                        false
                     } else if (state.prompt.is_some()) {
                         handle_prompt_key(key.code, key.modifiers, &mut state)
                     } else if (state.active_input.is_some()) {
@@ -2034,7 +2054,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             match client::send(Request::RenameFolder {
                 index: prompt.torrent_index,
                 old_prefix: old_prefix.clone(),
-                new_prefix,
+                new_prefix: new_prefix.clone(),
                 decisions: None,
             })? {
                 Response::Ok => Ok(()),
@@ -2050,17 +2070,49 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                         Err(anyhow::anyhow!("rejected: {}", summary))
                     }
                 }
+                Response::RenameConfirmation { concerns } => {
+                    state.rename_confirm = Some(RenameConfirm {
+                        kind: RenameConfirmKind::Folder {
+                            index: prompt.torrent_index,
+                            old_prefix: old_prefix.clone(),
+                            new_prefix,
+                        },
+                        concerns: concerns.into_iter().collect(),
+                        decisions: crate::ipc::RenameDecisions {
+                            merge_same: true,
+                            merge_unrelated: true,
+                            untracked: crate::ipc::UntrackedChoice::Leave,
+                        },
+                    });
+                    Ok(())
+                }
                 Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
                 _ => Err(anyhow::anyhow!("unexpected response")),
             }
         }
         PromptAction::Move => {
+            let new_save_path = prompt.single_line_buffer();
             match client::send(Request::Move {
                 index: prompt.torrent_index,
-                new_save_path: prompt.single_line_buffer(),
+                new_save_path: new_save_path.clone(),
                 decisions: None,
             })? {
                 Response::Ok => Ok(()),
+                Response::RenameConfirmation { concerns } => {
+                    state.rename_confirm = Some(RenameConfirm {
+                        kind: RenameConfirmKind::Move {
+                            index: prompt.torrent_index,
+                            new_save_path,
+                        },
+                        concerns: concerns.into_iter().collect(),
+                        decisions: crate::ipc::RenameDecisions {
+                            merge_same: true,
+                            merge_unrelated: true,
+                            untracked: crate::ipc::UntrackedChoice::Leave,
+                        },
+                    });
+                    Ok(())
+                }
                 Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
                 _ => Err(anyhow::anyhow!("unexpected response")),
             }
@@ -3325,6 +3377,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.prompt.is_some()) {
         draw_prompt(frame, state);
     }
+    if (state.rename_confirm.is_some()) {
+        draw_rename_confirm(frame, state);
+    }
     if (state.column_picker.is_some()) {
         draw_column_picker(frame, state);
     }
@@ -3795,6 +3850,158 @@ fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
         Paragraph::new(hint).style(Style::default().fg(Color::Gray)),
         layout[3],
     );
+}
+
+fn draw_rename_confirm(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(confirm) = &state.rename_confirm else { return; };
+    let Some(concern) = confirm.concerns.front() else { return; };
+
+    let (message, hint_line) = match concern {
+        crate::ipc::RenameConcern::MergeSame => (
+            "destination folder already exists — merge contents?".to_string(),
+            Line::from(vec![
+                Span::styled(" a ", Style::default().fg(Color::Yellow)),
+                Span::raw("always  "),
+                Span::styled("y ", Style::default().fg(Color::Yellow)),
+                Span::raw("yes  "),
+                Span::styled("n ", Style::default().fg(Color::Yellow)),
+                Span::raw("cancel"),
+            ]),
+        ),
+        crate::ipc::RenameConcern::MergeUnrelated { unrelated_count } => (
+            format!("destination contains {} unrelated file(s) — merge anyway?", unrelated_count),
+            Line::from(vec![
+                Span::styled(" a ", Style::default().fg(Color::Yellow)),
+                Span::raw("always  "),
+                Span::styled("y ", Style::default().fg(Color::Yellow)),
+                Span::raw("yes  "),
+                Span::styled("n ", Style::default().fg(Color::Yellow)),
+                Span::raw("cancel"),
+            ]),
+        ),
+        crate::ipc::RenameConcern::UntrackedFiles { count } => (
+            format!("{} untracked file(s) in folder — what should happen to them?", count),
+            Line::from(vec![
+                Span::styled(" a ", Style::default().fg(Color::Yellow)),
+                Span::raw("always move  "),
+                Span::styled("l ", Style::default().fg(Color::Yellow)),
+                Span::raw("always leave  "),
+                Span::styled("m ", Style::default().fg(Color::Yellow)),
+                Span::raw("move  "),
+                Span::styled("e ", Style::default().fg(Color::Yellow)),
+                Span::raw("leave"),
+            ]),
+        ),
+    };
+
+    let area = frame.area();
+    let height = 7u16.min(area.height.saturating_sub(2));
+    let width = (area.width * 70 / 100).clamp(50, area.width.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" rename confirmation ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // gap
+        Constraint::Min(1),    // message
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // hint
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(message).wrap(ratatui::widgets::Wrap { trim: true }),
+        layout[1],
+    );
+    frame.render_widget(
+        Paragraph::new(hint_line).style(Style::default().fg(Color::Gray)),
+        layout[3],
+    );
+}
+
+fn handle_rename_confirm_key(key: KeyCode, state: &mut AppState) {
+    let Some(confirm) = state.rename_confirm.as_mut() else { return; };
+    let Some(concern) = confirm.concerns.front().cloned() else { return; };
+    let mut cancelled = false;
+    match concern {
+        crate::ipc::RenameConcern::MergeSame => match key {
+            KeyCode::Char('a') => {
+                confirm.decisions.merge_same = true;
+                let _ = submit_set("rename_merge_same", "always");
+            }
+            KeyCode::Char('y') => confirm.decisions.merge_same = true,
+            KeyCode::Char('n') => {
+                confirm.decisions.merge_same = false;
+                cancelled = true;
+            }
+            _ => return,
+        },
+        crate::ipc::RenameConcern::MergeUnrelated { .. } => match key {
+            KeyCode::Char('a') => {
+                confirm.decisions.merge_unrelated = true;
+                let _ = submit_set("rename_merge_unrelated", "always");
+            }
+            KeyCode::Char('y') => confirm.decisions.merge_unrelated = true,
+            KeyCode::Char('n') => {
+                confirm.decisions.merge_unrelated = false;
+                cancelled = true;
+            }
+            _ => return,
+        },
+        crate::ipc::RenameConcern::UntrackedFiles { .. } => match key {
+            KeyCode::Char('a') => {
+                confirm.decisions.untracked = crate::ipc::UntrackedChoice::Move;
+                let _ = submit_set("rename_untracked_files", "always_move");
+            }
+            KeyCode::Char('l') => {
+                confirm.decisions.untracked = crate::ipc::UntrackedChoice::Leave;
+                let _ = submit_set("rename_untracked_files", "always_leave");
+            }
+            KeyCode::Char('m') => confirm.decisions.untracked = crate::ipc::UntrackedChoice::Move,
+            KeyCode::Char('e') => confirm.decisions.untracked = crate::ipc::UntrackedChoice::Leave,
+            _ => return,
+        },
+    }
+    confirm.concerns.pop_front();
+    if (cancelled) {
+        state.rename_confirm = None;
+        state.error = Some("rename cancelled".to_string());
+        return;
+    }
+    if (confirm.concerns.is_empty()) {
+        resend_rename_confirm(state);
+    }
+}
+
+fn resend_rename_confirm(state: &mut AppState) {
+    let Some(confirm) = state.rename_confirm.take() else { return; };
+    let decisions = Some(confirm.decisions);
+    let response = match confirm.kind {
+        RenameConfirmKind::Folder { index, old_prefix, new_prefix } =>
+            client::send(Request::RenameFolder { index, old_prefix, new_prefix, decisions }),
+        RenameConfirmKind::Move { index, new_save_path } =>
+            client::send(Request::Move { index, new_save_path, decisions }),
+    };
+    match response {
+        Ok(Response::RenameResult { renamed, rejected }) if rejected.is_empty() =>
+            state.error = Some(format!("renamed {} file(s)", renamed.len())),
+        Ok(Response::RenameResult { rejected, .. }) =>
+            state.error = rejected.first().map(|(_, reason)| reason.clone()),
+        Ok(Response::Ok) => state.error = Some("moved".to_string()),
+        Ok(Response::Err(message)) => state.error = Some(message),
+        Ok(_) => state.error = Some("unexpected response".to_string()),
+        Err(error) => state.error = Some(error.to_string()),
+    }
 }
 
 fn draw_main(frame: &mut ratatui::Frame, state: &mut AppState) {
