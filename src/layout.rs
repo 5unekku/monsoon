@@ -1,3 +1,120 @@
 //! pure path logic shared by the tui (rename input resolution) and the daemon
 //! (content layout + folder-rename planning). no libtorrent or filesystem
 //! access — just string work over `/`-separated torrent paths.
+
+use crate::ipc::ContentLayout;
+
+/// sanitize a torrent display name into one safe on-disk path component:
+/// replace separators/nulls with `_`, trim surrounding dots and whitespace.
+/// returns None when nothing usable remains.
+pub fn sanitize_path_component(name: &str) -> Option<String> {
+    let replaced: String = name.chars()
+        .map(|character| if (character == '/' || character == '\\' || character == '\0') { '_' } else { character })
+        .collect();
+    let trimmed = replaced.trim().trim_matches('.').trim();
+    if (trimmed.is_empty() || trimmed == "..") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// the single path component shared as the first segment by every file
+/// (the torrent's root folder for a multi-file torrent). None when files
+/// don't all share a top folder (including single-file torrents).
+pub fn common_root(files: &[String]) -> Option<String> {
+    let first = files.first()?;
+    if (!first.contains('/')) { return None; }
+    let root = first.split('/').next()?;
+    if (root.is_empty()) { return None; }
+    let all_share = files.iter().all(|path| path.contains('/') && path.split('/').next() == Some(root));
+    if (all_share) { Some(root.to_string()) } else { None }
+}
+
+/// compute file renames to put `files` into `resolved` layout. `name` is the
+/// torrent's effective display name. only changed files are returned, as
+/// (file_index, new_path). pass a resolved (non-Default) layout.
+pub fn compute_content_layout_renames(
+    files: &[String],
+    name: &str,
+    resolved: ContentLayout,
+) -> Vec<(usize, String)> {
+    let multi = files.len() > 1;
+    // the natural layout already satisfies these — nothing to do
+    match resolved {
+        ContentLayout::Default | ContentLayout::IfMultiple => return Vec::new(),
+        ContentLayout::Always if multi => return Vec::new(),
+        ContentLayout::Never if !multi => return Vec::new(),
+        _ => {}
+    }
+    let mut renames: Vec<(usize, String)> = Vec::new();
+    match resolved {
+        ContentLayout::Never => {
+            if let Some(root) = common_root(files) {
+                let prefix = format!("{}/", root);
+                for (index, path) in files.iter().enumerate() {
+                    if let Some(rest) = path.strip_prefix(&prefix) {
+                        renames.push((index, rest.to_string()));
+                    }
+                }
+            }
+        }
+        ContentLayout::Always => {
+            // only reached for a single-file torrent
+            if let Some(folder) = sanitize_path_component(name) {
+                let path = &files[0];
+                let filename = path.rsplit('/').next().unwrap_or(path);
+                renames.push((0, format!("{}/{}", folder, filename)));
+            }
+        }
+        _ => {}
+    }
+    renames
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn paths(list: &[&str]) -> Vec<String> { list.iter().map(|s| s.to_string()).collect() }
+
+    #[test]
+    fn never_strips_root_on_multi_file() {
+        let files = paths(&["Show/ep1.mkv", "Show/sub/ep2.mkv"]);
+        let out = compute_content_layout_renames(&files, "Show", ContentLayout::Never);
+        assert_eq!(out, vec![(0, "ep1.mkv".to_string()), (1, "sub/ep2.mkv".to_string())]);
+    }
+
+    #[test]
+    fn never_is_noop_on_single_file() {
+        let files = paths(&["movie.mkv"]);
+        assert!(compute_content_layout_renames(&files, "movie.mkv", ContentLayout::Never).is_empty());
+    }
+
+    #[test]
+    fn always_wraps_single_file_using_torrent_name() {
+        // name differs from filename (e.g. a renamed torrent)
+        let files = paths(&["movie.mkv"]);
+        let out = compute_content_layout_renames(&files, "My Movie", ContentLayout::Always);
+        assert_eq!(out, vec![(0, "My Movie/movie.mkv".to_string())]);
+    }
+
+    #[test]
+    fn always_is_noop_on_multi_file() {
+        let files = paths(&["Show/ep1.mkv", "Show/ep2.mkv"]);
+        assert!(compute_content_layout_renames(&files, "Show", ContentLayout::Always).is_empty());
+    }
+
+    #[test]
+    fn if_multiple_is_always_noop() {
+        assert!(compute_content_layout_renames(&paths(&["a.mkv"]), "a.mkv", ContentLayout::IfMultiple).is_empty());
+        assert!(compute_content_layout_renames(&paths(&["X/a.mkv", "X/b.mkv"]), "X", ContentLayout::IfMultiple).is_empty());
+    }
+
+    #[test]
+    fn sanitize_strips_separators_and_dots() {
+        assert_eq!(sanitize_path_component("a/b"), Some("a_b".to_string()));
+        assert_eq!(sanitize_path_component("  ..  "), None);
+        assert_eq!(sanitize_path_component("Normal Name"), Some("Normal Name".to_string()));
+        assert_eq!(sanitize_path_component(""), None);
+    }
+}
