@@ -30,6 +30,36 @@ pub fn common_root(files: &[String]) -> Option<String> {
     if (all_share) { Some(root.to_string()) } else { None }
 }
 
+/// resolve a user-typed rename against the parent directory of the item being
+/// renamed. `parent` is the root-relative parent path ("" at the torrent
+/// root). supports `.` and `..`; rejects ascending above the root or resolving
+/// to the root itself. returns the new root-relative path.
+pub fn resolve_rename_input(parent: &str, input: &str) -> Result<String, String> {
+    let trimmed = input.trim();
+    if (trimmed.is_empty()) {
+        return Err("name cannot be empty".to_string());
+    }
+    if (trimmed.contains('\0')) {
+        return Err("name cannot contain null bytes".to_string());
+    }
+    let mut segments: Vec<&str> = Vec::new();
+    for raw in parent.split('/').chain(trimmed.split('/')) {
+        match raw {
+            "" | "." => {}
+            ".." => {
+                if (segments.pop().is_none()) {
+                    return Err("cannot ascend above the torrent root".to_string());
+                }
+            }
+            other => segments.push(other),
+        }
+    }
+    if (segments.is_empty()) {
+        return Err("name cannot resolve to the torrent root".to_string());
+    }
+    Ok(segments.join("/"))
+}
+
 /// compute file renames to put `files` into `resolved` layout. `name` is the
 /// torrent's effective display name. only changed files are returned, as
 /// (file_index, new_path). pass a resolved (non-Default) layout.
@@ -116,5 +146,29 @@ mod tests {
         assert_eq!(sanitize_path_component("  ..  "), None);
         assert_eq!(sanitize_path_component("Normal Name"), Some("Normal Name".to_string()));
         assert_eq!(sanitize_path_component(""), None);
+    }
+
+    #[test]
+    fn resolve_keeps_sibling_in_same_parent() {
+        assert_eq!(resolve_rename_input("Show", "Season 2"), Ok("Show/Season 2".to_string()));
+        assert_eq!(resolve_rename_input("", "Renamed"), Ok("Renamed".to_string()));
+    }
+
+    #[test]
+    fn resolve_ascends_with_dotdot() {
+        assert_eq!(resolve_rename_input("Show/Season 1", "../Extras"), Ok("Show/Extras".to_string()));
+        assert_eq!(resolve_rename_input("Show", "../Top"), Ok("Top".to_string()));
+    }
+
+    #[test]
+    fn resolve_rejects_escaping_root() {
+        assert!(resolve_rename_input("Show", "../../Escape").is_err());
+        assert!(resolve_rename_input("", "../x").is_err());
+    }
+
+    #[test]
+    fn resolve_rejects_empty_or_root() {
+        assert!(resolve_rename_input("Show", "  ").is_err());
+        assert!(resolve_rename_input("Show", "..").is_err());
     }
 }
