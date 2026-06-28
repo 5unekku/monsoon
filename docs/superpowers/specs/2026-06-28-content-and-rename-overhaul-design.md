@@ -65,12 +65,12 @@ with no foreground (`src/tui.rs:3413`, `4120`, `4439`, `4489`, `4547`), while gr
 highlight style over the row's base style, so the row keeps `fg(DarkGray)` on a `DarkGray`
 background — invisible.
 
-**Fix:** give the selected-row highlight an explicit, contrasting style — a readable
-foreground plus a background distinct from `DarkGray` (e.g. reversed video, or a brighter
-background with an explicit light foreground), applied consistently across the affected
-tables. The main torrent list already uses `fg(Black).bg(Cyan)` (`src/tui.rs:2933`) and is
-fine; align the file/tracker/priority tables with an equally legible scheme. Verify that
-priority-0 / skipped / stopped rows stay readable when selected.
+**Fix:** give the selected-row highlight an **explicit foreground and background** (not the
+`REVERSED` modifier — reversing a row that already carries `fg(DarkGray)` just swaps it to a
+`DarkGray` background and can stay low-contrast). Setting an explicit `fg` deterministically
+overrides the row's greyed foreground. Apply one legible scheme consistently across the affected
+tables; the main torrent list already uses `fg(Black).bg(Cyan)` (`src/tui.rs:2933`) and is a good
+template. Verify that priority-0 / skipped / stopped rows stay readable when selected.
 
 ---
 
@@ -105,29 +105,43 @@ resolved against the `default_content_layout` preference **server-side**, at app
 the preference lives in the daemon config. The daemon stores the desired layout on the torrent
 record (`pending_layout: Option<ContentLayout>`).
 
-The layout is applied once the torrent reaches a **stable, verified state** — metadata present
-and the initial file check (`checking_resume_data` / `checking_files`) complete. This makes one
-code path work for both `.torrent` adds (metadata immediate) and magnets (metadata deferred).
-Practically, metadata delivers structure and the file list together, so for a fresh add no data
-exists yet and applying the layout is a cheap path rewrite. If the layout is **changed later**,
-it is re-applied (honoring the new choice even if that means libtorrent physically moves
-already-downloaded files).
+The layout is applied when the torrent first reaches a verified state — triggered by
+libtorrent's **`torrent_checked_alert`**, which fires after metadata is present and the initial
+file check completes, so one path covers both `.torrent` and magnet adds. The daemon keeps a
+per-torrent latch and clears `pending_layout` on apply, so the renames it issues — which
+themselves cause a re-check — do not re-trigger application. If the layout is **changed later**,
+`pending_layout` is set again and re-applied (honoring the new choice even if libtorrent must
+physically move already-downloaded files). `Default` is resolved against `default_content_layout`
+once, at apply time; changing the preference afterward does **not** retroactively re-lay-out
+torrents already processed.
 
-**Path-rewrite computation** (given the file list and the torrent name):
+**Implementation dependency:** confirm `torrent_checked_alert` is surfaced by
+`bridge_pop_alerts` (the bridge currently maps `file_renamed_alert`, `storage_moved_alert`,
+etc.); add it to the mapping if missing. No other new bridge field is needed — `state` and
+`files()` already expose what's required.
 
-- Determine the common root folder, if any: the first path component shared by every file.
-  A multi-file torrent normally has one (its name); a single-file torrent has none.
-- **Always:** ensure a root folder named after the torrent. If a common root already exists,
-  no-op; if not (single-file, or flat multi-file), prepend `"<torrent name>/"` to every path.
-- **Never:** if a common root exists, strip it from every path; else no-op.
-- **IfMultiple:** files > 1 → behave as **Always**; files == 1 → behave as **Never**.
+**Path-rewrite computation.** libtorrent always presents a multi-file torrent's files under its
+name as the first path component (`"<name>/…"`), and a single-file torrent as a bare file whose
+path equals the name. So only two transforms are ever non-trivial:
+
+- **Never** — strip a leading `"<name>/"` from every file path. Affects multi-file torrents
+  (files move directly into the save path, inner structure preserved); single-file paths have no
+  such prefix, so it is a no-op.
+- **Always** — ensure a folder named after the torrent. Multi-file already has it (no-op); a
+  single-file torrent's lone file `name` is renamed to `"<name>/<name>"` (see open questions —
+  for a single file the torrent name *is* the filename).
+- **IfMultiple** — the torrent's natural layout already satisfies this (multi-file has a root
+  folder, single-file does not), so it is a **no-op in all cases**. It exists as the safe default
+  and is the value `Default` usually resolves to.
 
 Apply by issuing `handle.rename_file(i, new_path)` for each file whose path changes, then clear
 `pending_layout`. The existing alert loop already logs `file_renamed_alert` /
 `file_rename_failed_alert`.
 
 This deletes the `todo!()` at `src/tui.rs:2271`; the dispatch loop simply includes the resolved
-layout in each `Request::Add`.
+layout in each `Request::Add`. **Internal add paths** (RSS feeds, watch directories — which call
+`add_magnet` / `add_file` directly) pass `ContentLayout::Default`, so they honor
+`default_content_layout` too.
 
 ---
 
@@ -150,7 +164,9 @@ prompt with `file.path` (`src/tui.rs:1750`) — both full paths from the torrent
   (folder) or `file.path` (file).
 - Interpret the typed input **relative to the item's parent directory**. Compute
   `new_full = normalize(parent + "/" + input)`.
-- Support `../` to ascend one level. `normalize` collapses `.` and `..` segments.
+- Support `../` to ascend one level. `normalize` is **purely lexical** (string-only, no
+  filesystem access — these are torrent-internal `/`-separated paths, not real on-disk paths):
+  it collapses `.` and resolves `..` against preceding segments.
 - **Reject** if the normalized path still contains a leading `..` (would escape the torrent
   root) or is empty / resolves to the root itself.
 - Resolution and the escape-check happen TUI-side (it knows the parent). The already-resolved,
@@ -185,6 +201,14 @@ File-conflict detection already exists for single-file rename (`check_rename_col
 result. This work routes those into the hard-reject path with the "rename manually" message and
 extends the same check to the move operation.
 
+**Detection is part logical, part on-disk:** *merge-same* is computed from the torrent's file
+list (logical — independent of what has downloaded); *merge-unrelated* and *untracked* (C3)
+require scanning the real directory and therefore only see files that have actually been
+materialized on disk. **Applicability by operation:** a **file rename** can only ever trigger the
+file-conflict hard-reject — it cannot merge a folder and has no untracked-files concern. **Folder
+rename** can trigger all three concerns. **Move** can trigger merge + file-conflict (no untracked
+handling — see non-goals).
+
 ### C3. Untracked files inside a renamed folder — move or leave
 
 When **renaming a folder**, the real source directory (`save_path/<old_prefix>`) may contain
@@ -194,9 +218,16 @@ at the old location), subject to a preference (C4). "Move" also sweeps up an oth
 leftover directory (i.e. cleans up / relocates the now-empty folder). This applies only to
 folder rename, not to file rename or the root move.
 
-When "Move" is chosen, the server performs the libtorrent renames for tracked files first
-(libtorrent creates the destination directory), then physically relocates the untracked
-files/empty dirs into the destination via `std::fs`.
+When "Move" is chosen: libtorrent's `rename_file` calls are **asynchronous** (they complete
+later via `file_renamed_alert`), so we cannot sequence the untracked moves strictly "after" the
+tracked ones. We don't need to — they operate on **different files**. The server therefore:
+(1) ensures the destination directory exists (`std::fs::create_dir_all`); (2) `std::fs::rename`s
+the untracked files into it — independent of libtorrent's timing; (3) submits the libtorrent
+renames for the tracked files. The only genuinely order-sensitive step is **removing the now-empty
+source directory** (since the tracked files leave it asynchronously): this is done **best-effort
+and deferred** — attempt a non-recursive `remove_dir` after the batch's `file_renamed_alert`s
+arrive, and let a later pass retry if it's not yet empty. A failed untracked `std::fs` move is
+surfaced to the user without rolling back tracked renames that already succeeded.
 
 ### C4. Preferences (three)
 
@@ -231,8 +262,9 @@ Because the daemon may run on a different machine, **all filesystem inspection i
    - untracked: **Always move / Always leave / Move / Leave**
    - **No** cancels the whole operation.
 5. For any "Always…" choice the TUI also sends a `SetConfig` to persist that preference.
-6. The TUI re-sends the original request with explicit `decisions`. The server commits: tracked
-   renames/moves first, then untracked `std::fs` moves for any "move" decision.
+6. The TUI re-sends the original request with explicit `decisions`. The server commits per C3:
+   ensure the destination dir, `std::fs`-move any untracked files for a "move" decision, submit
+   the libtorrent renames, and defer the best-effort empty-source-dir cleanup.
 
 ### C6. Move (root relocation) brought into scope
 
@@ -256,8 +288,10 @@ drop the dead path while keeping the `security-anonymity-priorities` memory poin
 **New / changed requests (`src/ipc.rs`):**
 
 - `Add` gains `content_layout: ContentLayout`.
-- `RenameFile`, `RenameFolder`, `Move` each gain an optional `decisions: RenameDecisions`
-  (merge approval flags + untracked move/leave choice).
+- `RenameFile`, `RenameFolder`, `Move` each gain an optional `decisions: Option<RenameDecisions>`
+  (absent on the first call → server analyzes; present on the re-send → server commits).
+  `RenameDecisions { merge_same: bool, merge_unrelated: bool, untracked: UntrackedChoice }`
+  where `UntrackedChoice { Move, Leave }`. The `bool`s mean "user approved this merge".
 
 **New responses:**
 
@@ -291,11 +325,21 @@ drop the dead path while keeping the `security-anonymity-priorities` memory poin
     message; untracked move/leave behaves; `Always…` choices persist to config; move honors the
     same rules.
 
+## Open questions
+
+- **Single-file `Always`.** A single-file torrent's name *is* its filename, so wrapping yields
+  `"<name>/<name>"` (e.g. `movie.mkv/movie.mkv`). Default plan: do exactly that (literally
+  "a folder named after the torrent"). Alternative: strip the extension for the folder
+  (`movie/movie.mkv`). Pick before implementing B3.
+
 ## Risks / notes
 
-- The verified-state apply (B3) needs a reliable signal that the initial check is done; if the
-  chosen signal is noisy, guard against applying the layout more than once per torrent
-  (the `pending_layout` flag is cleared on apply).
-- Untracked-file `std::fs` moves (C3) must order after the libtorrent renames and handle the
-  source directory being emptied; failures there should surface to the user without corrupting
-  the tracked rename that already succeeded.
+- The B3 trigger relies on `torrent_checked_alert`; if the bridge doesn't surface it, that's a
+  small bridge addition (see B3 implementation dependency). The per-torrent latch
+  (`pending_layout` cleared on apply) prevents double-application when the layout renames cause a
+  re-check.
+- C3's only async-sensitive step is empty-source-dir cleanup; it is best-effort/deferred (see
+  C3). Untracked `std::fs` move failures surface to the user without rolling back tracked renames
+  that already succeeded.
+- Two-phase rename (C5) has a small TOCTOU window between analysis and the decision re-send; for a
+  single-user daemon this is acceptable, and the commit step's own checks remain authoritative.
