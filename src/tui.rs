@@ -1726,10 +1726,11 @@ fn open_content_rename_prompt(state: &mut AppState) {
     };
 
     if (row.is_folder) {
+        let basename = row.full_path.rsplit('/').next().unwrap_or(&row.full_path).to_string();
         state.prompt = Some(Prompt {
             title: format!("rename folder \"{}\"", row.full_path),
-            helper: "new folder path (relative to the torrent root). renaming into an existing folder merges automatically; file-on-file collisions are rejected.".to_string(),
-            lines: vec![row.full_path.clone()],
+            helper: "new name (relative to this folder's parent). use ../ to move up; cannot leave the torrent root. merging into an existing folder warns; file collisions are rejected.".to_string(),
+            lines: vec![basename],
             cursor_line: 0,
             action: PromptAction::RenameFolder { old_prefix: row.full_path.clone() },
             torrent_index,
@@ -1737,10 +1738,11 @@ fn open_content_rename_prompt(state: &mut AppState) {
         });
     } else if let Some(file_index) = row.file_index {
         let Some(file) = detail.files.get(file_index) else { return; };
+        let basename = file.path.rsplit('/').next().unwrap_or(&file.path).to_string();
         state.prompt = Some(Prompt {
             title: format!("rename file \"{}\"", row.label),
-            helper: "new path relative to the torrent root. collisions with existing files are rejected.".to_string(),
-            lines: vec![file.path.clone()],
+            helper: "new name (relative to this file's folder). use ../ to move up; cannot leave the torrent root. collisions with existing files are rejected.".to_string(),
+            lines: vec![basename],
             cursor_line: 0,
             action: PromptAction::RenameFile { file_index },
             torrent_index,
@@ -2002,10 +2004,21 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             }
         }
         PromptAction::RenameFile { file_index } => {
+            let current_path = state.detail.as_ref()
+                .and_then(|detail| detail.files.get(*file_index))
+                .map(|file| file.path.clone());
+            let Some(current_path) = current_path else {
+                return Err(anyhow::anyhow!("file list not loaded"));
+            };
+            let parent = current_path.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+            let new_name = match crate::layout::resolve_rename_input(parent, &prompt.single_line_buffer()) {
+                Ok(path) => path,
+                Err(error) => return Err(anyhow::anyhow!("{}", error)),
+            };
             match client::send(Request::RenameFile {
                 index: prompt.torrent_index,
                 file_index: *file_index,
-                new_name: prompt.single_line_buffer(),
+                new_name,
             })? {
                 Response::Ok => Ok(()),
                 Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
@@ -2013,10 +2026,15 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             }
         }
         PromptAction::RenameFolder { old_prefix } => {
+            let parent = old_prefix.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
+            let new_prefix = match crate::layout::resolve_rename_input(parent, &prompt.single_line_buffer()) {
+                Ok(path) => path,
+                Err(error) => return Err(anyhow::anyhow!("{}", error)),
+            };
             match client::send(Request::RenameFolder {
                 index: prompt.torrent_index,
                 old_prefix: old_prefix.clone(),
-                new_prefix: prompt.single_line_buffer(),
+                new_prefix,
                 decisions: None,
             })? {
                 Response::Ok => Ok(()),
