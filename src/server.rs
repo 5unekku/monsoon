@@ -867,6 +867,11 @@ impl App {
                 if let Ok(relative) = source.strip_prefix(&source_dir) {
                     let target = dest_dir.join(relative);
                     if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
+                    // skip rather than silently overwrite — caller must resolve conflicts manually
+                    if (target.exists()) {
+                        tracing::warn!(target = %target.display(), "untracked move skipped: destination already exists");
+                        continue;
+                    }
                     if let Err(error) = std::fs::rename(source, &target) {
                         tracing::warn!(source = %source.display(), "untracked move failed: {}", error);
                     }

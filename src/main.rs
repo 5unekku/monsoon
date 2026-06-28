@@ -450,9 +450,11 @@ fn command_to_request(command: Commands) -> Request {
             Request::RenameFile { index, file_index, new_name }
         }
         Commands::RenameFolder { index, old_prefix, new_prefix } => {
-            Request::RenameFolder { index, old_prefix, new_prefix, decisions: None }
+            // cli is non-interactive: approve merges, leave untracked files — server still rejects file-on-file conflicts
+            Request::RenameFolder { index, old_prefix, new_prefix, decisions: Some(crate::ipc::RenameDecisions { merge_same: true, merge_unrelated: true, untracked: crate::ipc::UntrackedChoice::Leave }) }
         }
-        Commands::Move { index, new_save_path } => Request::Move { index, new_save_path, decisions: None },
+        // cli is non-interactive: approve merges, leave untracked files — server still rejects file-on-file conflicts
+        Commands::Move { index, new_save_path } => Request::Move { index, new_save_path, decisions: Some(crate::ipc::RenameDecisions { merge_same: true, merge_unrelated: true, untracked: crate::ipc::UntrackedChoice::Leave }) },
         Commands::Reannounce { index } => Request::Reannounce { index },
         Commands::Priority { index, file_index, priority } => {
             Request::SetFilePriority { index, file_index, priority }

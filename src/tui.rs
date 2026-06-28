@@ -1020,7 +1020,6 @@ impl Default for AddOptions {
     }
 }
 
-
 /// modal form shown after the add-torrent prompt: walks each pending entry
 /// and lets the user tune options before dispatch. on the last entry's
 /// confirm we send every Add together.
