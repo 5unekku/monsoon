@@ -336,7 +336,7 @@ struct SettingField {
 
 /// schema for the settings page. ordering matters: security & anonymity first,
 /// then connection (interface binding, port forwarding), then everything else.
-/// see plans/TODO-tui.md and the security-anonymity-priorities memory.
+/// see the security-anonymity-priorities memory.
 const SETTING_FIELDS: &[SettingField] = &[
     // ── security & anonymity (first — defaults bias toward safety) ──
     SettingField {
