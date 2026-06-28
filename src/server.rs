@@ -511,6 +511,32 @@ impl App {
         }
     }
 
+    /// apply any pending content layout once a torrent is verified (metadata
+    /// present and past the initial check). issues rename_file calls and clears
+    /// the latch so the resulting re-check doesn't re-trigger.
+    fn apply_pending_layouts(&mut self) {
+        let mut changed = false;
+        for torrent in self.torrents.iter_mut() {
+            let Some(layout) = torrent.pending_layout else { continue; };
+            let status = torrent.handle.status();
+            if (!status.has_metadata) { continue; }
+            if (matches!(status.state.as_str(), "downloading_metadata" | "checking_files" | "checking_resume_data")) {
+                continue;
+            }
+            let files: Vec<String> = torrent.handle.files().iter().map(|file| file.path.clone()).collect();
+            if (files.is_empty()) { continue; }
+            let name = torrent.display_name.clone().unwrap_or(status.name);
+            let renames = crate::layout::compute_content_layout_renames(&files, &name, layout);
+            for (file_index, new_path) in &renames {
+                torrent.handle.rename_file(*file_index as i32, new_path);
+                tracing::info!(torrent = %torrent.info_hash, file_index, new_path, "content layout rename");
+            }
+            torrent.pending_layout = None;
+            changed = true;
+        }
+        if (changed) { self.persist_torrent_list(); }
+    }
+
     /// check each configured rss feed against its poll interval and add any
     /// new matching items. returns the total number of torrents submitted.
     pub fn poll_rss_feeds(&mut self) {
@@ -1769,6 +1795,7 @@ pub fn run(quiet: bool) -> Result<()> {
             // resume data on the same cadence — they arrive as alerts.
             app.post_session_stats();
             app.process_alerts();
+            app.apply_pending_layouts();
             app.process_completion_hooks();
             app.drain_pending_resume_data();
             last_alert_check = Instant::now();
