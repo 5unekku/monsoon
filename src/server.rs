@@ -35,6 +35,9 @@ struct ManagedTorrent {
     /// set when the torrent first transitions to "finished" so
     /// completion_script does not fire twice
     was_finished: bool,
+    /// resolved content layout still to apply once the torrent is verified.
+    /// None = nothing pending (already laid out, or IfMultiple no-op).
+    pending_layout: Option<crate::ipc::ContentLayout>,
 }
 
 /// persisted record of a known torrent so the daemon can reload it on restart
@@ -52,6 +55,8 @@ struct TorrentRecord {
     interface_override: Option<String>,
     #[serde(default)]
     display_name: Option<String>,
+    #[serde(default)]
+    pending_layout: Option<crate::ipc::ContentLayout>,
 }
 
 pub struct App {
@@ -159,6 +164,7 @@ impl App {
                         interface_override: record.interface_override,
                         display_name: record.display_name,
                         was_finished: false,
+                        pending_layout: record.pending_layout,
                     });
                 }
                 Err(error) => tracing::warn!("failed to resume {}: {}", record.info_hash, error),
@@ -177,6 +183,7 @@ impl App {
             category: torrent.category.clone(),
             interface_override: torrent.interface_override.clone(),
             display_name: torrent.display_name.clone(),
+            pending_layout: torrent.pending_layout,
         }).collect();
         if let Ok(list_path) = Config::torrent_list_path() {
             if let Ok(json) = serde_json::to_string(&records) {
@@ -217,7 +224,9 @@ impl App {
         save_path: Option<&str>,
         category: Option<&str>,
         start_paused: bool,
+        content_layout: crate::ipc::ContentLayout,
     ) -> Result<String> {
+        let default_layout = self.config.default_content_layout.clone();
         let (save_path, mut tags) = self.resolve_add_target(save_path, category);
         let handle = self.session.add_torrent_magnet(uri, &save_path, None)?;
         if start_paused { handle.pause(); }
@@ -229,6 +238,8 @@ impl App {
         let trackers = handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
         let auto_tags = self.tag_rules.evaluate(&status.name, status.total_wanted, &trackers);
         tags.extend(auto_tags);
+        let resolved = content_layout.resolve(&default_layout);
+        let pending_layout = if (matches!(resolved, crate::ipc::ContentLayout::IfMultiple)) { None } else { Some(resolved) };
         self.torrents.push(ManagedTorrent {
             handle,
             magnet_uri: Some(uri.to_string()),
@@ -240,6 +251,7 @@ impl App {
             interface_override: None,
             display_name: None,
             was_finished: false,
+            pending_layout,
         });
         self.persist_torrent_list();
         Ok(info_hash)
@@ -251,10 +263,12 @@ impl App {
         save_path: Option<&str>,
         category: Option<&str>,
         start_paused: bool,
+        content_layout: crate::ipc::ContentLayout,
     ) -> Result<String> {
         if (!std::path::Path::new(file_path).exists()) {
             return Err(anyhow::anyhow!("file not found: {}", file_path));
         }
+        let default_layout = self.config.default_content_layout.clone();
         let (save_path, mut tags) = self.resolve_add_target(save_path, category);
         let handle = self.session.add_torrent_file(file_path, &save_path, None)?;
         if start_paused {
@@ -271,6 +285,8 @@ impl App {
         let trackers = handle.trackers().into_iter().map(|tracker| tracker.url).collect::<Vec<_>>();
         let auto_tags = self.tag_rules.evaluate(&status.name, status.total_wanted, &trackers);
         tags.extend(auto_tags);
+        let resolved = content_layout.resolve(&default_layout);
+        let pending_layout = if (matches!(resolved, crate::ipc::ContentLayout::IfMultiple)) { None } else { Some(resolved) };
         self.torrents.push(ManagedTorrent {
             handle,
             magnet_uri: None,
@@ -282,6 +298,7 @@ impl App {
             interface_override: None,
             display_name: None,
             was_finished: false,
+            pending_layout,
         });
         self.persist_torrent_list();
         Ok(info_hash)
@@ -519,10 +536,10 @@ impl App {
             for (key, uri) in items {
                 let result = match crate::sources::resolve(&uri) {
                     Ok(crate::sources::Source::Magnet(magnet)) => {
-                        self.add_magnet(&magnet, feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused)
+                        self.add_magnet(&magnet, feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused, crate::ipc::ContentLayout::Default)
                     }
                     Ok(crate::sources::Source::File(path)) => {
-                        self.add_file(&path.to_string_lossy(), feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused)
+                        self.add_file(&path.to_string_lossy(), feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused, crate::ipc::ContentLayout::Default)
                     }
                     Err(error) => Err(error),
                 };
@@ -762,7 +779,7 @@ impl App {
                     if (!self.watch_dir_seen.contains(&entry_path)) {
                         self.watch_dir_seen.insert(entry_path.clone());
                         let path_string = entry_path.to_string_lossy().to_string();
-                        match self.add_file(&path_string, None, None, false) {
+                        match self.add_file(&path_string, None, None, false, crate::ipc::ContentLayout::Default) {
                             Ok(hash) => {
                                 tracing::info!(file = %path_string, hash, "watch: added");
                                 let loaded = entry_path.with_extension("loaded.torrent");
@@ -934,18 +951,18 @@ impl App {
                     }
                 }
             }
-            Request::Add { uri, save_path, category, start_paused } => {
+            Request::Add { uri, save_path, category, start_paused, content_layout } => {
                 // delegate scheme + path resolution to the sources module so
                 // http/https/ftp/sftp urls and ~ expansion work uniformly.
                 match crate::sources::resolve(&uri) {
                     Ok(crate::sources::Source::Magnet(magnet)) => {
-                        match self.add_magnet(&magnet, save_path.as_deref(), category.as_deref(), start_paused) {
+                        match self.add_magnet(&magnet, save_path.as_deref(), category.as_deref(), start_paused, content_layout) {
                             Ok(hash) => Response::Added { id: hash },
                             Err(error) => Response::Err(error.to_string()),
                         }
                     }
                     Ok(crate::sources::Source::File(path)) => {
-                        match self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref(), start_paused) {
+                        match self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref(), start_paused, content_layout) {
                             Ok(hash) => Response::Added { id: hash },
                             Err(error) => Response::Err(error.to_string()),
                         }

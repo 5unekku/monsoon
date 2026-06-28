@@ -2255,6 +2255,7 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
             save_path,
             category: None,
             start_paused: !options.start,
+            content_layout: crate::ipc::ContentLayout::Default,
         }) {
             Ok(Response::Added { id }) => Some(id),
             Ok(Response::Err(message)) => { failures.push(format!("{}: {}", uri, message)); None }
