@@ -2675,11 +2675,13 @@ fn mouse_left_down(column: u16, row: u16, state: &mut AppState) {
     // torrent list row click — select that torrent. detect double-click for
     // open-detail (qBT-style).
     if (rect_contains(state.list_rect, column, row)) {
-        // list has a 1-row border, then a 1-row header, then data rows
+        // border + column header + divider, then data rows
         let header_offset = 2;
         let row_in_data = row.saturating_sub(state.list_rect.y + header_offset);
         let visible = state.filtered_indices();
-        let target = row_in_data as usize;
+        // the table scrolls to keep the selection visible, so the first
+        // on-screen data row corresponds to table_state.offset(), not 0
+        let target = state.table_state.offset() + row_in_data as usize;
         if (target < visible.len()) {
             state.table_state.select(Some(target));
         }
