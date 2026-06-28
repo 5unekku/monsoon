@@ -1341,6 +1341,37 @@ fn parse_bool(value: &str) -> bool {
     matches!(value, "true" | "1" | "yes")
 }
 
+/// true if any file that isn't part of this rename already lives under
+/// `new_prefix` — i.e. the rename merges into an existing (same-torrent) folder.
+fn folder_merge_same(static_files: &[String], new_prefix: &str) -> bool {
+    let dir_prefix = format!("{}/", new_prefix);
+    static_files.iter().any(|path| path.starts_with(&dir_prefix))
+}
+
+/// physically-present files under `dir` whose path relative to `save_root`
+/// isn't in `tracked` (the torrent's file paths). recurses. `save_root` is the
+/// torrent save path so on-disk paths map back to torrent-relative paths.
+fn scan_unrelated_in_dir(
+    dir: &std::path::Path,
+    tracked: &std::collections::HashSet<String>,
+    save_root: &std::path::Path,
+) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return out; };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if (path.is_dir()) {
+            out.extend(scan_unrelated_in_dir(&path, tracked, save_root));
+        } else if let Ok(relative) = path.strip_prefix(save_root) {
+            let key = relative.to_string_lossy().replace('\\', "/");
+            if (!tracked.contains(&key)) {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
 /// reject obviously dangerous rename targets before submitting to libtorrent.
 /// libtorrent itself will overwrite or escape the save_path silently otherwise.
 fn validate_rename_name(new_name: &str) -> Result<()> {
@@ -1928,4 +1959,38 @@ fn notify_systemd_ready() {
         socket_path
     };
     let _ = datagram.send_to(b"READY=1\n", &target);
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn merge_same_detects_existing_torrent_file_under_prefix() {
+        let static_files = vec!["Dest/already.txt".to_string(), "Other/x.txt".to_string()];
+        assert!(folder_merge_same(&static_files, "Dest"));
+        assert!(!folder_merge_same(&static_files, "Fresh"));
+    }
+
+    #[test]
+    fn scan_unrelated_lists_only_untracked_files() {
+        let dir = std::env::temp_dir().join(format!("monsoon_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("tracked.txt"), b"x").unwrap();
+        std::fs::write(dir.join("stray.txt"), b"y").unwrap();
+        std::fs::write(dir.join("sub/stray2.txt"), b"z").unwrap();
+
+        let mut tracked = HashSet::new();
+        tracked.insert("tracked.txt".to_string());
+
+        let mut found: Vec<String> = scan_unrelated_in_dir(&dir, &tracked, &dir)
+            .into_iter()
+            .map(|path| path.strip_prefix(&dir).unwrap().to_string_lossy().replace('\\', "/"))
+            .collect();
+        found.sort();
+        assert_eq!(found, vec!["stray.txt".to_string(), "sub/stray2.txt".to_string()]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
