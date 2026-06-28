@@ -602,7 +602,14 @@ impl App {
         }
     }
 
-    fn move_storage(&mut self, index: usize, new_save_path: &str) -> Result<()> {
+    fn move_storage(
+        &mut self,
+        index: usize,
+        new_save_path: &str,
+        decisions: Option<crate::ipc::RenameDecisions>,
+    ) -> Result<crate::ipc::Response> {
+        use crate::ipc::Response;
+
         let trimmed = new_save_path.trim();
         if (trimmed.is_empty()) {
             return Err(anyhow::anyhow!("save path cannot be empty"));
@@ -630,7 +637,36 @@ impl App {
         if let (Some(current), Some(new)) = (current_canon, new_canon) {
             if (current == new) {
                 tracing::info!(index, path = trimmed, "move_storage: destination resolves to the same path as current; skipping");
-                return Ok(());
+                return Ok(Response::Ok);
+            }
+        }
+
+        // snapshot tracked paths; immutable borrow ends before get_mut below
+        let tracked: std::collections::HashSet<String> = {
+            let torrent = self.torrents.get(index).unwrap();
+            torrent.handle.files().iter().map(|file| file.path.clone()).collect()
+        };
+        let dest = std::path::Path::new(trimmed);
+
+        // file-on-file conflict: a torrent file already exists at the destination
+        let mut conflict: Option<String> = None;
+        for relative in &tracked {
+            if (dest.join(relative).is_file()) { conflict = Some(relative.clone()); break; }
+        }
+        if let Some(conflict_file) = conflict {
+            return Err(anyhow::anyhow!("\"{}\" already exists at the destination — rename or remove it, then retry the move", conflict_file));
+        }
+
+        // merge warning: destination already holds unrelated files
+        let unrelated = scan_unrelated_in_dir(dest, &tracked, dest);
+        if (!unrelated.is_empty()) {
+            match (self.config.rename_merge_unrelated.as_str(), decisions) {
+                ("always", _) => {}
+                (_, Some(decision)) if decision.merge_unrelated => {}
+                (_, Some(_)) => return Ok(Response::Ok),
+                (_, None) => return Ok(Response::RenameConfirmation {
+                    concerns: vec![crate::ipc::RenameConcern::MergeUnrelated { unrelated_count: unrelated.len() }],
+                }),
             }
         }
 
@@ -641,7 +677,7 @@ impl App {
         // restart before completion still points at the right location
         self.persist_torrent_list();
         tracing::info!(index, new_save_path = trimmed, "submitted move_storage");
-        Ok(())
+        Ok(Response::Ok)
     }
 
     fn set_file_priority(&self, index: usize, file_index: usize, priority: u8) -> Result<()> {
@@ -1141,8 +1177,8 @@ impl App {
                     Ok(response) => response,
                     Err(error) => Response::Err(error.to_string()),
                 },
-            Request::Move { index, new_save_path, decisions: _ } => match self.move_storage(index, &new_save_path) {
-                Ok(_) => Response::Ok,
+            Request::Move { index, new_save_path, decisions } => match self.move_storage(index, &new_save_path, decisions) {
+                Ok(response) => response,
                 Err(error) => Response::Err(error.to_string()),
             },
             Request::Reannounce { index } => match self.torrents.get(index) {
