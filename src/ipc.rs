@@ -115,10 +115,10 @@ pub enum Request {
     /// rename a folder by rewriting the prefix of every file path that starts
     /// with `old_prefix`. validation is atomic — if any file in the set would
     /// fail validation, none are renamed.
-    RenameFolder { index: usize, old_prefix: String, new_prefix: String },
+    RenameFolder { index: usize, old_prefix: String, new_prefix: String, #[serde(default)] decisions: Option<RenameDecisions> },
     /// move the entire torrent's save directory. async — libtorrent emits
     /// storage_moved_alert / storage_moved_failed_alert.
-    Move { index: usize, new_save_path: String },
+    Move { index: usize, new_save_path: String, #[serde(default)] decisions: Option<RenameDecisions> },
     /// force tracker announce immediately (bypass the regular interval)
     Reannounce { index: usize },
     /// set the download priority for a single file. 0 = skip, 1..=7 = normal..high.
@@ -172,6 +172,30 @@ pub enum Request {
     /// remove a tracker url from a torrent
     RemoveTracker { index: usize, url: String },
     Shutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UntrackedChoice { Move, Leave }
+
+impl Default for UntrackedChoice {
+    fn default() -> Self { UntrackedChoice::Leave }
+}
+
+/// the user's resolved answers for a rename/move that needed confirmation.
+/// the bools mean "the user approved this merge".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RenameDecisions {
+    pub merge_same: bool,
+    pub merge_unrelated: bool,
+    pub untracked: UntrackedChoice,
+}
+
+/// a single thing the daemon wants the user to confirm before a rename/move.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RenameConcern {
+    MergeSame,
+    MergeUnrelated { unrelated_count: usize },
+    UntrackedFiles { count: usize },
 }
 
 /// whether to wrap a torrent's content in a folder named after the torrent.
@@ -252,6 +276,10 @@ pub enum Response {
     /// alerts and is logged by the daemon. `rejected` are paths that failed
     /// pre-flight validation, paired with the human-readable reason.
     RenameResult { renamed: Vec<usize>, rejected: Vec<(usize, String)> },
+    /// the daemon needs the user to confirm one or more merge/untracked concerns
+    /// before it will commit the rename or move. resend the original request
+    /// with `decisions` filled in.
+    RenameConfirmation { concerns: Vec<RenameConcern> },
     /// magnet URI for a torrent (empty string when invalid or not yet ready)
     Magnet(String),
     /// list of categories

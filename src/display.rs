@@ -45,6 +45,8 @@ pub fn print_response(response: Response) {
         Response::Feeds(feeds) => print_feeds(&feeds),
         Response::Ok => {}
         Response::Err(message) => eprintln!("error: {}", message),
+        // daemon should never send this to the cli client; ignore gracefully
+        Response::RenameConfirmation { .. } => eprintln!("unexpected rename confirmation response"),
     }
 }
 

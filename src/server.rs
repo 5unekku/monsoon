@@ -1068,13 +1068,13 @@ impl App {
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
-            Request::RenameFolder { index, old_prefix, new_prefix } => {
+            Request::RenameFolder { index, old_prefix, new_prefix, decisions: _ } => {
                 match self.rename_folder(index, &old_prefix, &new_prefix) {
                     Ok(response) => response,
                     Err(error) => Response::Err(error.to_string()),
                 }
             }
-            Request::Move { index, new_save_path } => match self.move_storage(index, &new_save_path) {
+            Request::Move { index, new_save_path, decisions: _ } => match self.move_storage(index, &new_save_path) {
                 Ok(_) => Response::Ok,
                 Err(error) => Response::Err(error.to_string()),
             },

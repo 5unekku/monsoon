@@ -2017,6 +2017,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                 index: prompt.torrent_index,
                 old_prefix: old_prefix.clone(),
                 new_prefix: prompt.single_line_buffer(),
+                decisions: None,
             })? {
                 Response::Ok => Ok(()),
                 Response::RenameResult { renamed, rejected } => {
@@ -2039,6 +2040,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             match client::send(Request::Move {
                 index: prompt.torrent_index,
                 new_save_path: prompt.single_line_buffer(),
+                decisions: None,
             })? {
                 Response::Ok => Ok(()),
                 Response::Err(message) => Err(anyhow::anyhow!("{}", message)),
@@ -3191,7 +3193,7 @@ fn commit_priority_step_rename(state: &mut AppState) {
         PriorityRenameTarget::File { file_index } =>
             { let _ = client::send(Request::RenameFile { index: torrent_index, file_index, new_name: buffer }); }
         PriorityRenameTarget::Folder { old_prefix } =>
-            { let _ = client::send(Request::RenameFolder { index: torrent_index, old_prefix, new_prefix: buffer }); }
+            { let _ = client::send(Request::RenameFolder { index: torrent_index, old_prefix, new_prefix: buffer, decisions: None }); }
     }
 }
 
