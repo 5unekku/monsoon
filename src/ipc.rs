@@ -174,6 +174,53 @@ pub enum Request {
     Shutdown,
 }
 
+/// whether to wrap a torrent's content in a folder named after the torrent.
+/// `Default` resolves to the `default_content_layout` config setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContentLayout {
+    Default,
+    Always,
+    Never,
+    IfMultiple,
+}
+
+impl Default for ContentLayout {
+    fn default() -> Self { ContentLayout::Default }
+}
+
+impl ContentLayout {
+    pub fn label(self) -> &'static str {
+        match self {
+            ContentLayout::Default => "default",
+            ContentLayout::Always => "always",
+            ContentLayout::Never => "never",
+            ContentLayout::IfMultiple => "if multiple files",
+        }
+    }
+
+    pub fn cycle(self) -> Self {
+        match self {
+            ContentLayout::Default => ContentLayout::Always,
+            ContentLayout::Always => ContentLayout::Never,
+            ContentLayout::Never => ContentLayout::IfMultiple,
+            ContentLayout::IfMultiple => ContentLayout::Default,
+        }
+    }
+
+    /// turn `Default` into a concrete layout using the config string;
+    /// any unrecognised setting falls back to the natural `IfMultiple`.
+    pub fn resolve(self, default_setting: &str) -> ContentLayout {
+        match self {
+            ContentLayout::Default => match default_setting {
+                "always" => ContentLayout::Always,
+                "never" => ContentLayout::Never,
+                _ => ContentLayout::IfMultiple,
+            },
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CategoryInfo {
     pub name: String,
@@ -213,4 +260,27 @@ pub enum Response {
     Feeds(Vec<FeedInfo>),
     Ok,
     Err(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn content_layout_cycle_is_four_way() {
+        let order = [ContentLayout::Default, ContentLayout::Always, ContentLayout::Never, ContentLayout::IfMultiple];
+        for (index, layout) in order.iter().enumerate() {
+            assert_eq!(layout.cycle(), order[(index + 1) % order.len()]);
+        }
+    }
+
+    #[test]
+    fn content_layout_resolve_maps_default_to_setting() {
+        assert_eq!(ContentLayout::Default.resolve("always"), ContentLayout::Always);
+        assert_eq!(ContentLayout::Default.resolve("never"), ContentLayout::Never);
+        assert_eq!(ContentLayout::Default.resolve("if_multiple"), ContentLayout::IfMultiple);
+        assert_eq!(ContentLayout::Default.resolve("garbage"), ContentLayout::IfMultiple);
+        // non-default passes through untouched
+        assert_eq!(ContentLayout::Never.resolve("always"), ContentLayout::Never);
+    }
 }

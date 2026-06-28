@@ -7,6 +7,7 @@ mod client;
 mod config;
 mod display;
 mod ipc;
+mod layout;
 mod network;
 mod server;
 mod session;
