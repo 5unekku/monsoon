@@ -22,8 +22,8 @@ use std::time::{Duration, Instant};
 use crate::client;
 use crate::config::Config;
 use crate::ipc::{
-    FeedInfo, PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail, TorrentInfo,
-    TrackerInfo,
+    ContentLayout, FeedInfo, PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail,
+    TorrentInfo, TrackerInfo,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -990,7 +990,7 @@ struct AddOptions {
     start: bool,
     sequential: bool,
     first_last: bool,
-    subfolder: SubfolderMode,
+    content_layout: ContentLayout,
     save_path: String,
 }
 
@@ -1000,31 +1000,12 @@ impl Default for AddOptions {
             start: true,
             sequential: false,
             first_last: false,
-            subfolder: SubfolderMode::Default,
+            content_layout: ContentLayout::default(),
             save_path: String::new(),
         }
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum SubfolderMode { Default, Yes, No }
-
-impl SubfolderMode {
-    fn label(self) -> &'static str {
-        match self {
-            SubfolderMode::Default => "default",
-            SubfolderMode::Yes => "yes",
-            SubfolderMode::No => "no",
-        }
-    }
-    fn cycle(self) -> Self {
-        match self {
-            SubfolderMode::Default => SubfolderMode::Yes,
-            SubfolderMode::Yes => SubfolderMode::No,
-            SubfolderMode::No => SubfolderMode::Default,
-        }
-    }
-}
 
 /// modal form shown after the add-torrent prompt: walks each pending entry
 /// and lets the user tune options before dispatch. on the last entry's
@@ -2222,7 +2203,7 @@ fn activate_add_options_field(state: &mut AppState) {
         0 => options.start = !options.start,
         1 => options.sequential = !options.sequential,
         2 => options.first_last = !options.first_last,
-        3 => options.subfolder = options.subfolder.cycle(),
+        3 => options.content_layout = options.content_layout.cycle(),
         4 => form.edit_buffer = Some(options.save_path.clone()),
         _ => {}
     }
@@ -2255,7 +2236,7 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
             save_path,
             category: None,
             start_paused: !options.start,
-            content_layout: crate::ipc::ContentLayout::Default,
+            content_layout: options.content_layout,
         }) {
             Ok(Response::Added { id }) => Some(id),
             Ok(Response::Err(message)) => { failures.push(format!("{}: {}", uri, message)); None }
@@ -2281,7 +2262,6 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
                 paused_entries.push(uri.clone());
             }
         }
-        if (!matches!(options.subfolder, SubfolderMode::Default)) { todo!("subfolder mode") }
     }
     if (failures.is_empty()) {
         state.error = Some(format!("added {} torrent(s)", succeeded));
@@ -3538,7 +3518,7 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
         ("start",          format_bool(options.start)),
         ("sequential",     format_bool(options.sequential)),
         ("first/last",     format_bool(options.first_last).to_string()),
-        ("create subfolder", options.subfolder.label().to_string()),
+        ("create subfolder", options.content_layout.label().to_string()),
         ("download path",  path_display),
         ("",               button_label.to_string()),
     ];
