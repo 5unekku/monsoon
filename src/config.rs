@@ -23,6 +23,9 @@ pub struct Config {
     /// upload cap in KiB/s (0 = unlimited)
     pub upload_rate_limit: i32,
     pub default_save_path: String,
+    /// default content layout for new torrents: always | never | if_multiple
+    #[serde(default = "default_content_layout")]
+    pub default_content_layout: String,
     pub enable_dht: bool,
     pub enable_lsd: bool,
     pub enable_upnp: bool,
@@ -167,6 +170,7 @@ fn default_tui_detail_split_percent() -> u16 { 40 }
 fn default_proxy_type() -> String { "none".to_string() }
 fn default_true() -> bool { true }
 fn default_ip_filter_refresh_hours() -> u64 { 24 }
+fn default_content_layout() -> String { "if_multiple".to_string() }
 
 impl Default for Config {
     fn default() -> Self {
@@ -183,6 +187,7 @@ impl Default for Config {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .to_string_lossy()
                 .to_string(),
+            default_content_layout: default_content_layout(),
             enable_dht: true,
             enable_lsd: true,
             enable_upnp: true,

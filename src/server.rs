@@ -338,6 +338,12 @@ impl App {
             "download_rate_limit" | "dl_limit" => self.config.download_rate_limit = value.parse()?,
             "upload_rate_limit" | "ul_limit" => self.config.upload_rate_limit = value.parse()?,
             "default_save_path" => self.config.default_save_path = value.to_string(),
+            "default_content_layout" => {
+                if (!matches!(value, "always" | "never" | "if_multiple")) {
+                    return Err(anyhow::anyhow!("default_content_layout must be: always | never | if_multiple"));
+                }
+                self.config.default_content_layout = value.to_string();
+            }
             "watch_directories" => {
                 self.config.watch_directories = value.lines()
                     .map(|line| line.trim().to_string())
