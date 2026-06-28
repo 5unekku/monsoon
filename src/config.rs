@@ -26,6 +26,15 @@ pub struct Config {
     /// default content layout for new torrents: always | never | if_multiple
     #[serde(default = "default_content_layout")]
     pub default_content_layout: String,
+    /// confirm merging a rename into a folder already holding this torrent's files
+    #[serde(default = "default_ask")]
+    pub rename_merge_same: String,
+    /// confirm merging into an on-disk folder that also holds unrelated files
+    #[serde(default = "default_ask")]
+    pub rename_merge_unrelated: String,
+    /// what to do with untracked files inside a renamed folder
+    #[serde(default = "default_ask")]
+    pub rename_untracked_files: String,
     pub enable_dht: bool,
     pub enable_lsd: bool,
     pub enable_upnp: bool,
@@ -171,6 +180,7 @@ fn default_proxy_type() -> String { "none".to_string() }
 fn default_true() -> bool { true }
 fn default_ip_filter_refresh_hours() -> u64 { 24 }
 fn default_content_layout() -> String { "if_multiple".to_string() }
+fn default_ask() -> String { "ask".to_string() }
 
 impl Default for Config {
     fn default() -> Self {
@@ -188,6 +198,9 @@ impl Default for Config {
                 .to_string_lossy()
                 .to_string(),
             default_content_layout: default_content_layout(),
+            rename_merge_same: default_ask(),
+            rename_merge_unrelated: default_ask(),
+            rename_untracked_files: default_ask(),
             enable_dht: true,
             enable_lsd: true,
             enable_upnp: true,

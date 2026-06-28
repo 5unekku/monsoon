@@ -361,6 +361,24 @@ impl App {
                 }
                 self.config.default_content_layout = value.to_string();
             }
+            "rename_merge_same" => {
+                if (!matches!(value, "always" | "ask")) {
+                    return Err(anyhow::anyhow!("rename_merge_same must be: always | ask"));
+                }
+                self.config.rename_merge_same = value.to_string();
+            }
+            "rename_merge_unrelated" => {
+                if (!matches!(value, "always" | "ask")) {
+                    return Err(anyhow::anyhow!("rename_merge_unrelated must be: always | ask"));
+                }
+                self.config.rename_merge_unrelated = value.to_string();
+            }
+            "rename_untracked_files" => {
+                if (!matches!(value, "always_move" | "always_leave" | "ask")) {
+                    return Err(anyhow::anyhow!("rename_untracked_files must be: always_move | always_leave | ask"));
+                }
+                self.config.rename_untracked_files = value.to_string();
+            }
             "watch_directories" => {
                 self.config.watch_directories = value.lines()
                     .map(|line| line.trim().to_string())
