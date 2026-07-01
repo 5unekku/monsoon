@@ -26,6 +26,13 @@ pub struct Config {
     /// default content layout for new torrents: always | never | if_multiple
     #[serde(default = "default_content_layout")]
     pub default_content_layout: String,
+    /// most-recently-used save paths, front = most recent. written by the
+    /// daemon on successful add-with-explicit-path and on successful move.
+    #[serde(default)]
+    pub recent_save_paths: Vec<String>,
+    /// how many recent save paths to keep. 0 disables recording and the picker.
+    #[serde(default = "default_recent_paths_limit")]
+    pub recent_paths_limit: u16,
     /// confirm merging a rename into a folder already holding this torrent's files
     #[serde(default = "default_ask")]
     pub rename_merge_same: String,
@@ -181,6 +188,21 @@ fn default_true() -> bool { true }
 fn default_ip_filter_refresh_hours() -> u64 { 24 }
 fn default_content_layout() -> String { "if_multiple".to_string() }
 fn default_ask() -> String { "ask".to_string() }
+fn default_recent_paths_limit() -> u16 { 5 }
+
+/// move-to-front dedup, then truncate to limit. limit 0 clears the list.
+/// normalization is whitespace trim plus trailing-slash trim (a bare "/"
+/// stays intact) so "/data/tv" and "/data/tv/" dedup to one entry. empty
+/// input after trimming is a no-op. no canonicalization on purpose: the
+/// path may not even be mounted, and the list mirrors what the user typed.
+pub fn record_recent_path(list: &mut Vec<String>, path: &str, limit: u16) {
+    let trimmed = path.trim();
+    let normalized = if (trimmed == "/") { "/" } else { trimmed.trim_end_matches('/') };
+    if (normalized.is_empty()) { return; }
+    list.retain(|entry| entry.as_str() != normalized);
+    list.insert(0, normalized.to_string());
+    list.truncate(limit as usize);
+}
 
 impl Default for Config {
     fn default() -> Self {
@@ -198,6 +220,8 @@ impl Default for Config {
                 .to_string_lossy()
                 .to_string(),
             default_content_layout: default_content_layout(),
+            recent_save_paths: Vec::new(),
+            recent_paths_limit: default_recent_paths_limit(),
             rename_merge_same: default_ask(),
             rename_merge_unrelated: default_ask(),
             rename_untracked_files: default_ask(),
@@ -312,6 +336,9 @@ impl Config {
             self.tui_detail_split_percent = default.tui_detail_split_percent;
         }
 
+        // recent save paths never exceed their cap, even after hand-edits
+        self.recent_save_paths.truncate(self.recent_paths_limit as usize);
+
         // listen_address must be non-empty (libtorrent bails otherwise)
         if (self.listen_address.trim().is_empty()) {
             self.listen_address = default.listen_address.clone();
@@ -408,5 +435,82 @@ impl Config {
     /// where stdout/stderr go when the daemon is detached
     pub fn log_path() -> Result<PathBuf> {
         Ok(Self::proj_dirs()?.data_dir().join("daemon.log"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(entries: &[&str]) -> Vec<String> {
+        entries.iter().map(|entry| entry.to_string()).collect()
+    }
+
+    #[test]
+    fn record_inserts_at_front() {
+        let mut paths = list(&["/data/movies"]);
+        record_recent_path(&mut paths, "/data/tv", 5);
+        assert_eq!(paths, list(&["/data/tv", "/data/movies"]));
+    }
+
+    #[test]
+    fn record_moves_existing_entry_to_front_without_duplicating() {
+        let mut paths = list(&["/data/tv", "/data/movies", "/data/music"]);
+        record_recent_path(&mut paths, "/data/music", 5);
+        assert_eq!(paths, list(&["/data/music", "/data/tv", "/data/movies"]));
+    }
+
+    #[test]
+    fn record_existing_front_entry_is_stable() {
+        let mut paths = list(&["/data/tv", "/data/movies"]);
+        record_recent_path(&mut paths, "/data/tv", 5);
+        assert_eq!(paths, list(&["/data/tv", "/data/movies"]));
+    }
+
+    #[test]
+    fn record_truncates_to_limit() {
+        let mut paths = list(&["/one", "/two", "/three"]);
+        record_recent_path(&mut paths, "/zero", 3);
+        assert_eq!(paths, list(&["/zero", "/one", "/two"]));
+    }
+
+    #[test]
+    fn limit_zero_clears_the_list() {
+        let mut paths = list(&["/one", "/two"]);
+        record_recent_path(&mut paths, "/three", 0);
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn trailing_slash_and_whitespace_dedup_to_one_entry() {
+        let mut paths = Vec::new();
+        record_recent_path(&mut paths, "/data/tv", 5);
+        record_recent_path(&mut paths, "  /data/tv/  ", 5);
+        assert_eq!(paths, list(&["/data/tv"]));
+    }
+
+    #[test]
+    fn bare_root_slash_is_kept_intact() {
+        let mut paths = Vec::new();
+        record_recent_path(&mut paths, "/", 5);
+        assert_eq!(paths, list(&["/"]));
+    }
+
+    #[test]
+    fn empty_input_after_trimming_is_a_noop() {
+        let mut paths = list(&["/data/tv"]);
+        record_recent_path(&mut paths, "   ", 5);
+        assert_eq!(paths, list(&["/data/tv"]));
+    }
+
+    #[test]
+    fn sanitize_truncates_recent_paths_to_limit() {
+        let mut config = Config {
+            recent_paths_limit: 2,
+            recent_save_paths: list(&["/one", "/two", "/three"]),
+            ..Config::default()
+        };
+        config.sanitize();
+        assert_eq!(config.recent_save_paths, list(&["/one", "/two"]));
     }
 }
