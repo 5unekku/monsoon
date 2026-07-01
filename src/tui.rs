@@ -926,7 +926,7 @@ struct Prompt {
     helper: String,
     /// one line per item. most prompts use a single line; the add-torrent
     /// prompt uses shift+enter to add additional lines for bulk submission.
-    lines: Vec<String>,
+    lines: Vec<TextField>,
     /// index of the line being edited
     cursor_line: usize,
     /// the request to send when the user submits. takes the buffer as argument
@@ -941,7 +941,7 @@ struct Prompt {
 
 impl Prompt {
     fn single_line_buffer(&self) -> String {
-        self.lines.first().cloned().unwrap_or_default()
+        self.lines.first().map(|field| field.buffer().to_string()).unwrap_or_default()
     }
 }
 
@@ -1694,7 +1694,7 @@ fn open_rename_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: format!("rename torrent #{}", index),
         helper: "files inside are not renamed; use the content tab + F2 for individual files".to_string(),
-        lines: vec![current],
+        lines: vec![TextField::new(current)],
         cursor_line: 0,
         action: PromptAction::Rename,
         torrent_index: index,
@@ -1712,7 +1712,7 @@ fn open_move_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: format!("move torrent #{} — new save directory", index),
         helper: "absolute path. files will be moved on disk by libtorrent.".to_string(),
-        lines: vec![current],
+        lines: vec![TextField::with_completion(current, CompletionSource::Filesystem)],
         cursor_line: 0,
         action: PromptAction::Move,
         torrent_index: index,
@@ -1746,7 +1746,7 @@ fn open_content_rename_prompt(state: &mut AppState) {
         state.prompt = Some(Prompt {
             title: format!("rename folder \"{}\"", row.full_path),
             helper: "new name (relative to this folder's parent). use ../ to move up; cannot leave the torrent root. merging into an existing folder warns; file collisions are rejected.".to_string(),
-            lines: vec![basename],
+            lines: vec![TextField::new(basename)],
             cursor_line: 0,
             action: PromptAction::RenameFolder { old_prefix: row.full_path.clone() },
             torrent_index,
@@ -1758,7 +1758,7 @@ fn open_content_rename_prompt(state: &mut AppState) {
         state.prompt = Some(Prompt {
             title: format!("rename file \"{}\"", row.label),
             helper: "new name (relative to this file's folder). use ../ to move up; cannot leave the torrent root. collisions with existing files are rejected.".to_string(),
-            lines: vec![basename],
+            lines: vec![TextField::new(basename)],
             cursor_line: 0,
             action: PromptAction::RenameFile { file_index },
             torrent_index,
@@ -1791,7 +1791,7 @@ fn open_rate_limit_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: format!("rate limits for torrent #{}", index),
         helper: "bytes/sec  0 = unlimited  -1 = inherit global  line 1 = download  line 2 = upload".to_string(),
-        lines: vec![dl_str, ul_str],
+        lines: vec![TextField::new(dl_str), TextField::new(ul_str)],
         cursor_line: 0,
         action: PromptAction::SetRateLimit,
         torrent_index: index,
@@ -1804,7 +1804,7 @@ fn open_add_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: "add torrent (shift+enter to add another line)".to_string(),
         helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, or ~/foo.torrent — one per line".to_string(),
-        lines: vec![prefill],
+        lines: vec![TextField::with_completion(prefill, CompletionSource::Filesystem)],
         cursor_line: 0,
         action: PromptAction::Add,
         torrent_index: 0,
@@ -1856,7 +1856,7 @@ fn open_add_tracker_prompt(state: &mut AppState) {
     state.prompt = Some(Prompt {
         title: format!("add tracker to torrent #{}", index),
         helper: "announce url (e.g. udp://tracker.example.com:1337/announce)".to_string(),
-        lines: vec![String::new()],
+        lines: vec![TextField::new(String::new())],
         cursor_line: 0,
         action: PromptAction::AddTracker,
         torrent_index: index,
@@ -2118,7 +2118,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             // form. nothing hits the daemon yet — the options form owns
             // the dispatch on its own confirmation.
             let entries: Vec<String> = prompt.lines.iter()
-                .map(|line| line.trim().to_string())
+                .map(|field| field.buffer().trim().to_string())
                 .filter(|line| !line.is_empty())
                 .collect();
             if (entries.is_empty()) {
@@ -2136,10 +2136,10 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
         }
         PromptAction::SetRateLimit => {
             let download = prompt.lines.first()
-                .and_then(|line| line.trim().parse::<i32>().ok())
+                .and_then(|field| field.buffer().trim().parse::<i32>().ok())
                 .unwrap_or(-1);
             let upload = prompt.lines.get(1)
-                .and_then(|line| line.trim().parse::<i32>().ok())
+                .and_then(|field| field.buffer().trim().parse::<i32>().ok())
                 .unwrap_or(-1);
             match client::send(Request::SetTorrentRateLimit {
                 index: prompt.torrent_index,
@@ -2351,13 +2351,14 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
         (KeyCode::Esc, _) => state.prompt = None,
-        // shift+enter inserts a new line in multi-line prompts; plain enter
-        // always submits (consistent with the rest of the app).
         (KeyCode::Enter, KeyModifiers::SHIFT) => {
             if let Some(prompt) = state.prompt.as_mut() {
                 if (prompt.allow_multiline) {
+                    let completion = prompt.lines.get(prompt.cursor_line)
+                        .map(|field| field.completion_source())
+                        .unwrap_or(CompletionSource::None);
                     let insert_at = prompt.cursor_line + 1;
-                    prompt.lines.insert(insert_at, String::new());
+                    prompt.lines.insert(insert_at, TextField::with_completion(String::new(), completion));
                     prompt.cursor_line = insert_at;
                 }
             }
@@ -2378,49 +2379,99 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
         }
         (KeyCode::Up, _) => {
             if let Some(prompt) = state.prompt.as_mut() {
-                prompt.cursor_line = prompt.cursor_line.saturating_sub(1);
+                if (prompt.cursor_line > 0) {
+                    let column = prompt.lines[prompt.cursor_line].cursor();
+                    prompt.cursor_line -= 1;
+                    prompt.lines[prompt.cursor_line].set_cursor(column);
+                }
             }
         }
         (KeyCode::Down, _) => {
             if let Some(prompt) = state.prompt.as_mut() {
-                prompt.cursor_line = (prompt.cursor_line + 1).min(prompt.lines.len().saturating_sub(1));
-            }
-        }
-        (KeyCode::Backspace, _) => {
-            if let Some(prompt) = state.prompt.as_mut() {
-                let cursor = prompt.cursor_line;
-                let line_empty = prompt.lines.get(cursor).map(|line| line.is_empty()).unwrap_or(true);
-                if (line_empty && cursor > 0 && prompt.lines.len() > 1) {
-                    // backspace at the start of an empty line removes the line
-                    prompt.lines.remove(cursor);
-                    prompt.cursor_line = cursor - 1;
-                } else if let Some(line) = prompt.lines.get_mut(cursor) {
-                    line.pop();
+                if (prompt.cursor_line + 1 < prompt.lines.len()) {
+                    let column = prompt.lines[prompt.cursor_line].cursor();
+                    prompt.cursor_line += 1;
+                    prompt.lines[prompt.cursor_line].set_cursor(column);
                 }
             }
         }
+        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Left, KeyModifiers::ALT) => {
+            if let Some(field) = current_prompt_field(state) { field.move_word_left(); }
+        }
+        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::ALT) => {
+            if let Some(field) = current_prompt_field(state) { field.move_word_right(); }
+        }
+        (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
+            if let Some(field) = current_prompt_field(state) { field.delete_word_backward(); }
+        }
+        (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Delete, KeyModifiers::ALT) => {
+            if let Some(field) = current_prompt_field(state) { field.delete_word_forward(); }
+        }
+        (KeyCode::Left, _) => { if let Some(field) = current_prompt_field(state) { field.move_left(); } }
+        (KeyCode::Right, _) => { if let Some(field) = current_prompt_field(state) { field.move_right(); } }
+        (KeyCode::Home, _) => { if let Some(field) = current_prompt_field(state) { field.move_home(); } }
+        (KeyCode::End, _) => { if let Some(field) = current_prompt_field(state) { field.move_end(); } }
+        (KeyCode::Delete, _) => { if let Some(field) = current_prompt_field(state) { field.delete_forward(); } }
+        (KeyCode::Backspace, _) => {
+            if let Some(prompt) = state.prompt.as_mut() {
+                let cursor_line = prompt.cursor_line;
+                let at_line_start = prompt.lines.get(cursor_line)
+                    .map(|field| field.buffer().is_empty() && field.cursor() == 0)
+                    .unwrap_or(true);
+                if (at_line_start && cursor_line > 0 && prompt.lines.len() > 1) {
+                    prompt.lines.remove(cursor_line);
+                    prompt.cursor_line = cursor_line - 1;
+                    let end = prompt.lines[prompt.cursor_line].buffer().chars().count();
+                    prompt.lines[prompt.cursor_line].set_cursor(end);
+                } else if let Some(field) = prompt.lines.get_mut(cursor_line) {
+                    field.backspace();
+                }
+            }
+        }
+        (KeyCode::Char('v'), KeyModifiers::CONTROL) => paste_into_prompt(state),
+        (KeyCode::Tab, _) => { if let Some(field) = current_prompt_field(state) { field.tab_complete(); } }
         (KeyCode::Char(character), modifiers)
             if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
         {
-            if let Some(prompt) = state.prompt.as_mut() {
-                if let Some(line) = prompt.lines.get_mut(prompt.cursor_line) {
-                    line.push(character);
-                }
-            }
-        }
-        (KeyCode::Tab, _) => {
-            if let Some(prompt) = state.prompt.as_mut() {
-                if matches!(prompt.action, PromptAction::Move | PromptAction::AddFeed) {
-                    if let Some(line) = prompt.lines.get_mut(prompt.cursor_line) {
-                        *line = tab_complete_path(line);
-                    }
-                }
-            }
+            if let Some(field) = current_prompt_field(state) { field.insert_char(character); }
         }
         _ => {}
     }
     false
+}
+
+fn current_prompt_field(state: &mut AppState) -> Option<&mut TextField> {
+    let prompt = state.prompt.as_mut()?;
+    let cursor_line = prompt.cursor_line;
+    prompt.lines.get_mut(cursor_line)
+}
+
+/// paste clipboard text into the focused prompt line. in a multi-line-capable
+/// prompt, embedded newlines split into new lines (so pasting a list of paths
+/// — one per line — populates the add-torrent prompt the way typing them
+/// would); in a single-line prompt, newlines are stripped by `TextField::paste`.
+fn paste_into_prompt(state: &mut AppState) {
+    let Ok(mut clipboard) = arboard::Clipboard::new() else { return; };
+    let Ok(text) = clipboard.get_text() else { return; };
+    let Some(prompt) = state.prompt.as_mut() else { return; };
+    if (prompt.allow_multiline && text.contains('\n')) {
+        let completion = prompt.lines.get(prompt.cursor_line)
+            .map(|field| field.completion_source())
+            .unwrap_or(CompletionSource::None);
+        let mut pieces: Vec<&str> = text.split('\n').collect();
+        let first = pieces.remove(0);
+        if let Some(field) = prompt.lines.get_mut(prompt.cursor_line) { field.paste(first); }
+        let mut insert_at = prompt.cursor_line + 1;
+        for piece in pieces {
+            let piece = piece.trim_end_matches('\r').to_string();
+            prompt.lines.insert(insert_at, TextField::with_completion(piece, completion.clone()));
+            insert_at += 1;
+        }
+        prompt.cursor_line = insert_at - 1;
+    } else if let Some(field) = prompt.lines.get_mut(prompt.cursor_line) {
+        field.paste(&text);
+    }
 }
 
 /// when the focused row in the content tab is a folder, toggle its collapsed
@@ -2924,7 +2975,7 @@ fn handle_feeds_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState
             state.prompt = Some(Prompt {
                 title: " add feed — enter url ".to_string(),
                 helper: "url of the rss/atom feed to subscribe to".to_string(),
-                lines: vec![String::new()],
+                lines: vec![TextField::new(String::new())],
                 cursor_line: 0,
                 action: PromptAction::AddFeed,
                 torrent_index: 0,
@@ -3330,7 +3381,7 @@ fn tab_complete_content_filter(state: &mut AppState) {
     }
 }
 
-// temporary shim until prompts hold TextField directly (tasks 6-8):
+// temporary shim until the add-options form holds TextField directly (task 8):
 // route old whole-buffer completion through the shared textfield impl.
 fn tab_complete_path(buffer: &str) -> String {
     let mut field = TextField::with_completion(buffer, CompletionSource::Filesystem);
@@ -3802,15 +3853,14 @@ fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
         layout[0],
     );
 
-    let body_lines: Vec<Line> = prompt.lines.iter().enumerate().map(|(index, content)| {
+    let body_lines: Vec<Line> = prompt.lines.iter().enumerate().map(|(index, field)| {
         let is_cursor = index == prompt.cursor_line;
         let marker = if (is_cursor) { "› " } else { "  " };
-        let mut spans = vec![
-            Span::styled(marker, Style::default().fg(Color::Yellow)),
-            Span::raw(content.as_str()),
-        ];
+        let mut spans = vec![Span::styled(marker, Style::default().fg(Color::Yellow))];
         if (is_cursor) {
-            spans.push(Span::styled("█", Style::default().fg(Color::Yellow)));
+            spans.extend(render_field_with_cursor(field));
+        } else {
+            spans.push(Span::raw(field.buffer().to_string()));
         }
         Line::from(spans)
     }).collect();
