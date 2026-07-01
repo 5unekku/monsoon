@@ -72,6 +72,46 @@ impl TextField {
     pub fn move_right(&mut self) { self.cursor = (self.cursor + 1).min(self.char_len()); }
     pub fn move_home(&mut self) { self.cursor = 0; }
     pub fn move_end(&mut self) { self.cursor = self.char_len(); }
+
+    pub fn move_word_left(&mut self) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let mut index = self.cursor;
+        while (index > 0 && !is_word_char(chars[index - 1])) { index -= 1; }
+        while (index > 0 && is_word_char(chars[index - 1])) { index -= 1; }
+        self.cursor = index;
+    }
+
+    pub fn move_word_right(&mut self) {
+        let chars: Vec<char> = self.buffer.chars().collect();
+        let length = chars.len();
+        let mut index = self.cursor;
+        while (index < length && !is_word_char(chars[index])) { index += 1; }
+        while (index < length && is_word_char(chars[index])) { index += 1; }
+        self.cursor = index;
+    }
+
+    pub fn delete_word_backward(&mut self) {
+        let original_cursor = self.cursor;
+        self.move_word_left();
+        let new_cursor = self.cursor;
+        let byte_start = self.byte_offset(new_cursor);
+        let byte_end = self.byte_offset(original_cursor);
+        self.buffer.replace_range(byte_start..byte_end, "");
+    }
+
+    pub fn delete_word_forward(&mut self) {
+        let original_cursor = self.cursor;
+        self.move_word_right();
+        let boundary = self.cursor;
+        self.cursor = original_cursor;
+        let byte_start = self.byte_offset(original_cursor);
+        let byte_end = self.byte_offset(boundary);
+        self.buffer.replace_range(byte_start..byte_end, "");
+    }
+}
+
+fn is_word_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_'
 }
 
 #[cfg(test)]
@@ -157,5 +197,62 @@ mod tests {
         field.insert_char('★');
         assert_eq!(field.buffer(), "★日本");
         assert_eq!(field.cursor(), 1);
+    }
+
+    #[test]
+    fn move_word_left_skips_separators_then_word() {
+        let mut field = TextField::new("foo/bar baz");
+        field.set_cursor(11);
+        field.move_word_left();
+        assert_eq!(field.cursor(), 8);
+        field.move_word_left();
+        assert_eq!(field.cursor(), 4);
+        field.move_word_left();
+        assert_eq!(field.cursor(), 0);
+    }
+
+    #[test]
+    fn move_word_right_skips_word_then_separators() {
+        let mut field = TextField::new("foo/bar baz");
+        field.set_cursor(0);
+        field.move_word_right();
+        assert_eq!(field.cursor(), 3);
+        field.move_word_right();
+        assert_eq!(field.cursor(), 7);
+        field.move_word_right();
+        assert_eq!(field.cursor(), 11);
+    }
+
+    #[test]
+    fn delete_word_backward_removes_the_word_behind_cursor() {
+        let mut field = TextField::new("foo/bar");
+        field.set_cursor(7);
+        field.delete_word_backward();
+        assert_eq!(field.buffer(), "foo/");
+        assert_eq!(field.cursor(), 4);
+    }
+
+    #[test]
+    fn delete_word_forward_removes_the_word_ahead_of_cursor() {
+        let mut field = TextField::new("foo/bar");
+        field.set_cursor(4);
+        field.delete_word_forward();
+        assert_eq!(field.buffer(), "foo/");
+        assert_eq!(field.cursor(), 4);
+    }
+
+    #[test]
+    fn word_operations_at_buffer_edges_are_noop_not_panic() {
+        let mut field = TextField::new("abc");
+        field.set_cursor(0);
+        field.move_word_left();
+        assert_eq!(field.cursor(), 0);
+        field.delete_word_backward();
+        assert_eq!(field.buffer(), "abc");
+        field.set_cursor(3);
+        field.move_word_right();
+        assert_eq!(field.cursor(), 3);
+        field.delete_word_forward();
+        assert_eq!(field.buffer(), "abc");
     }
 }
