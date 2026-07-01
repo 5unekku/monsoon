@@ -80,6 +80,7 @@ enum Column {
     Size,
     Downloaded,
     Uploaded,
+    Ratio,
     AddedOn,
     CompletedOn,
     SavePath,
@@ -89,10 +90,10 @@ enum Column {
 }
 
 impl Column {
-    const ALL: [Column; 17] = [
+    const ALL: [Column; 18] = [
         Column::Index, Column::Name, Column::State, Column::Progress,
         Column::Down, Column::Up, Column::Peers, Column::Seeds,
-        Column::Size, Column::Downloaded, Column::Uploaded,
+        Column::Size, Column::Downloaded, Column::Uploaded, Column::Ratio,
         Column::AddedOn, Column::CompletedOn, Column::SavePath,
         Column::Category, Column::Tags, Column::InfoHash,
     ];
@@ -110,6 +111,7 @@ impl Column {
             Column::Size => "size",
             Column::Downloaded => "downloaded",
             Column::Uploaded => "uploaded",
+            Column::Ratio => "ratio",
             Column::AddedOn => "added_on",
             Column::CompletedOn => "completed_on",
             Column::SavePath => "save_path",
@@ -132,6 +134,7 @@ impl Column {
             Column::Size => "size",
             Column::Downloaded => "downloaded",
             Column::Uploaded => "uploaded",
+            Column::Ratio => "ratio",
             Column::AddedOn => "added on",
             Column::CompletedOn => "completed on",
             Column::SavePath => "save path",
@@ -158,6 +161,7 @@ impl Column {
             Column::Seeds => 9,
             Column::Size => 10,
             Column::Downloaded | Column::Uploaded => 12,
+            Column::Ratio => 7,
             Column::AddedOn | Column::CompletedOn => 19,
             Column::SavePath => 28,
             Column::Category => 12,
@@ -179,6 +183,7 @@ impl Column {
             Column::Size => crate::display::format_bytes(torrent.total_wanted),
             Column::Downloaded => crate::display::format_bytes(torrent.total_download),
             Column::Uploaded => crate::display::format_bytes(torrent.total_upload),
+            Column::Ratio => format!("{:.2}", torrent.ratio),
             Column::AddedOn => crate::display::format_timestamp(torrent.added_time),
             Column::CompletedOn => crate::display::format_timestamp(torrent.completed_time),
             Column::SavePath => torrent.save_path.clone(),

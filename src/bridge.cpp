@@ -288,8 +288,10 @@ rustbridge::TorrentStatus bridge_get_torrent_status(const lt::torrent_handle &hd
     ts.state = rust::String(state_to_string(st.state).c_str());
     ts.save_path = safe_rust_string(st.save_path);
     ts.progress = st.progress;
-    ts.total_download = st.total_download;
-    ts.total_upload = st.total_upload;
+    // all_time_* are payload-only and persist across restarts via resume data;
+    // total_download/upload are per-session and count protocol overhead too
+    ts.total_download = st.all_time_download;
+    ts.total_upload = st.all_time_upload;
     ts.total_done = st.total_done;
     ts.total_wanted = st.total_wanted;
     ts.download_rate = st.download_rate;

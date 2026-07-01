@@ -1416,6 +1416,7 @@ fn status_to_info(index: usize, torrent: &ManagedTorrent) -> TorrentInfo {
         total_done: status.total_done,
         total_download: status.total_download,
         total_upload: status.total_upload,
+        ratio: status.ratio,
         num_pieces: status.num_pieces,
         num_completed_pieces: status.num_completed_pieces,
         added_time: status.added_time,
