@@ -38,6 +38,11 @@ struct ManagedTorrent {
     /// resolved content layout still to apply once the torrent is verified.
     /// None = nothing pending (already laid out, or IfMultiple no-op).
     pending_layout: Option<crate::ipc::ContentLayout>,
+    /// snapshot of every file's path, taken once when the add-time organize
+    /// step concludes (see `Request::FinalizeAdd`). `None` until that
+    /// happens. used by `Request::RevertToDefaultLayout` to undo any renames
+    /// made after that point.
+    default_layout: Option<Vec<String>>,
 }
 
 /// persisted record of a known torrent so the daemon can reload it on restart
@@ -57,6 +62,8 @@ struct TorrentRecord {
     display_name: Option<String>,
     #[serde(default)]
     pending_layout: Option<crate::ipc::ContentLayout>,
+    #[serde(default)]
+    default_layout: Option<Vec<String>>,
 }
 
 pub struct App {
@@ -165,6 +172,7 @@ impl App {
                         display_name: record.display_name,
                         was_finished: false,
                         pending_layout: record.pending_layout,
+                        default_layout: record.default_layout,
                     });
                 }
                 Err(error) => tracing::warn!("failed to resume {}: {}", record.info_hash, error),
@@ -184,6 +192,7 @@ impl App {
             interface_override: torrent.interface_override.clone(),
             display_name: torrent.display_name.clone(),
             pending_layout: torrent.pending_layout,
+            default_layout: torrent.default_layout.clone(),
         }).collect();
         if let Ok(list_path) = Config::torrent_list_path() {
             if let Ok(json) = serde_json::to_string(&records) {
@@ -252,6 +261,7 @@ impl App {
             display_name: None,
             was_finished: false,
             pending_layout,
+            default_layout: None,
         });
         self.persist_torrent_list();
         Ok(info_hash)
@@ -299,6 +309,7 @@ impl App {
             display_name: None,
             was_finished: false,
             pending_layout,
+            default_layout: None,
         });
         self.persist_torrent_list();
         Ok(info_hash)
