@@ -952,8 +952,11 @@ enum PromptAction {
     Rename,
     Move,
     Add,
-    /// rename an individual file inside the active torrent
-    RenameFile { file_index: usize },
+    /// rename an individual file inside the active torrent. carries the
+    /// file's path at prompt-open time so submit does not depend on
+    /// state.detail, which belongs to the live tab's selected torrent and
+    /// can differ from the organize step's torrent.
+    RenameFile { file_index: usize, current_path: String },
     /// rename a folder inside the active torrent (recursive prefix rewrite).
     /// the backend already auto-merges into existing folders as long as no
     /// individual file paths collide, so no separate merge-confirm flow is
@@ -1041,12 +1044,6 @@ struct AddOptionsForm {
     edit_buffer: Option<TextField>,
 }
 
-enum PriorityRenameTarget {
-    Torrent,
-    File { file_index: usize },
-    Folder { old_prefix: String },
-}
-
 /// post-add file priority configuration step. appears after adding paused
 /// torrents so the user can cherry-pick files before any data downloads.
 /// one torrent at a time; tab/enter advances, esc skips.
@@ -1064,8 +1061,6 @@ struct PriorityStep {
     collapsed_folders: std::collections::BTreeSet<String>,
     last_poll: Instant,
     filter_active: bool,
-    rename_buffer: Option<String>,
-    rename_target: Option<PriorityRenameTarget>,
 }
 
 impl PriorityStep {
@@ -1085,8 +1080,6 @@ impl PriorityStep {
             collapsed_folders: std::collections::BTreeSet::new(),
             last_poll: Instant::now() - DETAIL_POLL_INTERVAL,
             filter_active: false,
-            rename_buffer: None,
-            rename_target: None,
         }
     }
 
@@ -1518,7 +1511,15 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     // input-routing ladder. each level captures input wholesale —
                     // letters bound in the main view don't reach handle_key while
                     // a higher level is active.
-                    let exit = if (state.priority_step.is_some()) {
+                    // rename_confirm and prompt outrank the priority step so
+                    // a rename prompt opened from inside the step (and its
+                    // merge-confirmation overlay) still receives input.
+                    let exit = if (state.rename_confirm.is_some()) {
+                        handle_rename_confirm_key(key.code, &mut state);
+                        false
+                    } else if (state.prompt.is_some()) {
+                        handle_prompt_key(key.code, key.modifiers, &mut state)
+                    } else if (state.priority_step.is_some()) {
                         handle_priority_step_key(key.code, key.modifiers, &mut state)
                     } else if (state.show_help) {
                         // any key closes help overlay
@@ -1534,11 +1535,6 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_options.is_some()) {
                         handle_add_options_key(key.code, key.modifiers, &mut state)
-                    } else if (state.rename_confirm.is_some()) {
-                        handle_rename_confirm_key(key.code, &mut state);
-                        false
-                    } else if (state.prompt.is_some()) {
-                        handle_prompt_key(key.code, key.modifiers, &mut state)
                     } else if (state.active_input.is_some()) {
                         handle_active_input_key(key.code, key.modifiers, &mut state)
                     } else if (matches!(state.mode, Mode::Settings(_))) {
@@ -1691,15 +1687,21 @@ fn open_rename_prompt(state: &mut AppState) {
         return;
     };
     let current = state.torrents.get(index).map(|torrent| torrent.name.clone()).unwrap_or_default();
-    state.prompt = Some(Prompt {
-        title: format!("rename torrent #{}", index),
+    state.prompt = Some(build_torrent_rename_prompt(index, current));
+}
+
+/// shared by the live view's `r` and the organize step's `t` so the torrent
+/// rename prompt stays identical on both surfaces.
+fn build_torrent_rename_prompt(torrent_index: usize, current_name: String) -> Prompt {
+    Prompt {
+        title: format!("rename torrent #{}", torrent_index),
         helper: "files inside are not renamed; use the content tab + F2 for individual files".to_string(),
-        lines: vec![TextField::new(current)],
+        lines: vec![TextField::new(current_name)],
         cursor_line: 0,
         action: PromptAction::Rename,
-        torrent_index: index,
+        torrent_index,
         allow_multiline: false,
-    });
+    }
 }
 
 fn open_move_prompt(state: &mut AppState) {
@@ -1720,6 +1722,25 @@ fn open_move_prompt(state: &mut AppState) {
     });
 }
 
+/// resolve which TreeRow is currently focused, given the raw pieces both the
+/// live Content tab (via `AppState`) and the add-time organize step (via
+/// `PriorityStep`) hold. this is the one place row lookup happens so the two
+/// surfaces cannot diverge on which row "focused" means.
+fn focused_tree_row(
+    detail: &TorrentDetail,
+    collapsed_folders: &std::collections::BTreeSet<String>,
+    filter_matches: &[usize],
+    filter_active: bool,
+    files_state: &TableState,
+) -> Option<TreeRow> {
+    let rows = if (filter_active) {
+        filter_content_rows(detail, filter_matches)
+    } else {
+        build_tree_rows(detail, collapsed_folders)
+    };
+    files_state.selected().and_then(|index| rows.get(index)).cloned()
+}
+
 /// open a rename prompt for the selected file or folder inside the content
 /// tab. routes to RenameFile/RenameFolder depending on the selected row.
 fn open_content_rename_prompt(state: &mut AppState) {
@@ -1731,39 +1752,134 @@ fn open_content_rename_prompt(state: &mut AppState) {
         state.error = Some("file list not loaded".to_string());
         return;
     };
-    let rows = if state.content_filter.is_empty() {
-        build_tree_rows(detail, &state.collapsed_folders)
-    } else {
-        filter_content_rows(detail, &state.content_filter_matches)
-    };
-    let Some(row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else {
+    let Some(row) = focused_tree_row(
+        detail,
+        &state.collapsed_folders,
+        &state.content_filter_matches,
+        !state.content_filter.is_empty(),
+        &state.detail_files_state,
+    ) else {
         state.error = Some("no file selected".to_string());
         return;
     };
+    state.prompt = Some(build_rename_prompt(detail, torrent_index, &row));
+}
 
+/// same as `open_content_rename_prompt` but sourced from the add-time
+/// organize step's own detail/filter/selection state. opening the shared
+/// Prompt overlay suspends the step underneath it, exactly like it suspends
+/// the live Content tab.
+fn open_priority_step_content_rename(state: &mut AppState) {
+    let Some(step) = state.priority_step.as_ref() else { return; };
+    let Some(torrent_index) = step.torrent_index() else { return; };
+    let Some(detail) = &step.detail else {
+        state.error = Some("file list not loaded".to_string());
+        return;
+    };
+    let Some(row) = focused_tree_row(
+        detail,
+        &step.collapsed_folders,
+        &step.filter_matches,
+        !step.filter.is_empty(),
+        &step.files_state,
+    ) else {
+        state.error = Some("no file selected".to_string());
+        return;
+    };
+    state.prompt = Some(build_rename_prompt(detail, torrent_index, &row));
+}
+
+/// shared by the live Content tab and the add-time organize step — this is
+/// the ONLY place a rename Prompt for a file/folder row gets constructed, so
+/// the two surfaces cannot drift on completion source, helper text, or the
+/// PromptAction they dispatch.
+fn build_rename_prompt(detail: &TorrentDetail, torrent_index: usize, row: &TreeRow) -> Prompt {
     if (row.is_folder) {
         let basename = row.full_path.rsplit('/').next().unwrap_or(&row.full_path).to_string();
-        state.prompt = Some(Prompt {
+        let siblings = sibling_folder_names(&detail.files, &row.full_path);
+        Prompt {
             title: format!("rename folder \"{}\"", row.full_path),
-            helper: "new name (relative to this folder's parent). use ../ to move up; cannot leave the torrent root. merging into an existing folder warns; file collisions are rejected.".to_string(),
-            lines: vec![TextField::new(basename)],
+            helper: "new name (relative to this folder's parent). use ../ to move up; cannot leave the torrent root. merging into an existing folder warns; file collisions are rejected. tab completes to an existing sibling folder to merge into it.".to_string(),
+            lines: vec![TextField::with_completion(basename, CompletionSource::SiblingFolders(siblings))],
             cursor_line: 0,
             action: PromptAction::RenameFolder { old_prefix: row.full_path.clone() },
             torrent_index,
             allow_multiline: false,
-        });
-    } else if let Some(file_index) = row.file_index {
-        let Some(file) = detail.files.get(file_index) else { return; };
-        let basename = file.path.rsplit('/').next().unwrap_or(&file.path).to_string();
-        state.prompt = Some(Prompt {
+        }
+    } else {
+        let file_index = row.file_index.unwrap_or(0);
+        let basename = row.full_path.rsplit('/').next().unwrap_or(&row.full_path).to_string();
+        Prompt {
             title: format!("rename file \"{}\"", row.label),
             helper: "new name (relative to this file's folder). use ../ to move up; cannot leave the torrent root. collisions with existing files are rejected.".to_string(),
             lines: vec![TextField::new(basename)],
             cursor_line: 0,
-            action: PromptAction::RenameFile { file_index },
+            action: PromptAction::RenameFile { file_index, current_path: row.full_path.clone() },
             torrent_index,
             allow_multiline: false,
-        });
+        }
+    }
+}
+
+/// every other folder name that shares `target_path`'s parent directory,
+/// derived from the torrent's own file list (not the real filesystem —
+/// folders that only exist in the torrent's metadata, not yet downloaded,
+/// still count). used to let rename-folder's Tab key complete to an existing
+/// sibling for a deliberate merge.
+fn sibling_folder_names(files: &[crate::ipc::FileInfo], target_path: &str) -> Vec<String> {
+    let parent_prefix = match target_path.rfind('/') {
+        Some(index) => &target_path[..index],
+        None => "",
+    };
+    let mut names: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for file in files {
+        let relative = if (parent_prefix.is_empty()) {
+            file.path.as_str()
+        } else {
+            let prefix = format!("{}/", parent_prefix);
+            match file.path.strip_prefix(prefix.as_str()) {
+                Some(rest) => rest,
+                None => continue,
+            }
+        };
+        let Some(slash_index) = relative.find('/') else { continue; };
+        let folder_name = &relative[..slash_index];
+        let full_folder_path = if (parent_prefix.is_empty()) {
+            folder_name.to_string()
+        } else {
+            format!("{}/{}", parent_prefix, folder_name)
+        };
+        if (full_folder_path != target_path) {
+            names.insert(folder_name.to_string());
+        }
+    }
+    names.into_iter().collect()
+}
+
+#[cfg(test)]
+mod sibling_folder_tests {
+    use super::sibling_folder_names;
+
+    fn file(path: &str) -> crate::ipc::FileInfo {
+        crate::ipc::FileInfo { index: 0, path: path.to_string(), size: 0, progress: 0.0, priority: 4 }
+    }
+
+    #[test]
+    fn finds_siblings_under_the_same_parent_excluding_self() {
+        let files = vec![
+            file("Show/Season 1/e01.mkv"),
+            file("Show/Season 2/e01.mkv"),
+            file("Show/Extras/behind.mkv"),
+        ];
+        let siblings = sibling_folder_names(&files, "Show/Season 1");
+        assert_eq!(siblings, vec!["Extras".to_string(), "Season 2".to_string()]);
+    }
+
+    #[test]
+    fn top_level_folder_gets_top_level_siblings() {
+        let files = vec![file("A/x.mkv"), file("B/y.mkv")];
+        let siblings = sibling_folder_names(&files, "A");
+        assert_eq!(siblings, vec!["B".to_string()]);
     }
 }
 
@@ -2019,13 +2135,7 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
                 _ => Err(anyhow::anyhow!("unexpected response")),
             }
         }
-        PromptAction::RenameFile { file_index } => {
-            let current_path = state.detail.as_ref()
-                .and_then(|detail| detail.files.get(*file_index))
-                .map(|file| file.path.clone());
-            let Some(current_path) = current_path else {
-                return Err(anyhow::anyhow!("file list not loaded"));
-            };
+        PromptAction::RenameFile { file_index, current_path } => {
             let parent = current_path.rsplit_once('/').map(|(head, _)| head).unwrap_or("");
             let new_name = match crate::layout::resolve_rename_input(parent, &prompt.single_line_buffer()) {
                 Ok(path) => path,
@@ -2497,45 +2607,51 @@ fn paste_into_prompt(state: &mut AppState) {
 /// when the focused row in the content tab is a folder, toggle its collapsed
 /// state. `collapse` true means a-or-left (collapse), false means d-or-right
 /// (expand). on file rows the key is a no-op.
-/// set the priority of the currently-selected row in the content tab. on a
-/// folder row this fans out to every descendant file (recursive). errors from
-/// individual rpc calls are accumulated into state.error.
-fn set_focused_priority(state: &mut AppState, priority: u8) {
-    let Some(torrent_index) = state.selected_torrent_index() else { return; };
-    let Some(detail) = &state.detail else { return; };
-    let rows = if state.content_filter.is_empty() {
-        build_tree_rows(detail, &state.collapsed_folders)
-    } else {
-        filter_content_rows(detail, &state.content_filter_matches)
-    };
-    let Some(selected_row) = state.detail_files_state.selected().and_then(|index| rows.get(index)) else { return; };
-
-    // collect target file indices. for a leaf row, that's just file_index.
-    // for a folder, walk every descendant file (regardless of the collapsed
-    // view — collapse is presentational, the operation still affects all
-    // descendants).
-    let targets: Vec<usize> = if (selected_row.is_folder) {
-        let prefix = format!("{}/", selected_row.full_path);
+/// set the priority of the currently-focused row, given the torrent index
+/// and the resolved row. shared by the live Content tab and the add-time
+/// organize step so their priority-setting logic (folder rows cascade to
+/// every descendant file, regardless of collapse state — collapse is
+/// presentational) cannot diverge. returns how many files were updated.
+fn apply_priority_to_row(torrent_index: usize, detail: &TorrentDetail, row: &TreeRow, priority: u8) -> Result<usize, String> {
+    let targets: Vec<usize> = if (row.is_folder) {
+        let prefix = format!("{}/", row.full_path);
         detail.files.iter().enumerate()
-            .filter(|(_, file)| file.path == selected_row.full_path || file.path.starts_with(&prefix))
+            .filter(|(_, file)| file.path == row.full_path || file.path.starts_with(&prefix))
             .map(|(file_index, _)| file_index)
             .collect()
-    } else if let Some(file_index) = selected_row.file_index {
+    } else if let Some(file_index) = row.file_index {
         vec![file_index]
     } else {
         Vec::new()
     };
-
-    if (targets.is_empty()) { return; }
+    if (targets.is_empty()) { return Ok(0); }
     let priorities: Vec<(usize, u8)> = targets.iter().map(|&file_index| (file_index, priority)).collect();
     let count = priorities.len();
     match client::send(Request::SetFilePrioritiesBatch { index: torrent_index, priorities }) {
-        Ok(Response::Ok) => {
-            state.error = Some(format!("priority {} set on {} file(s)", priority, count));
-        }
-        Ok(Response::Err(message)) => state.error = Some(format!("priority: {}", message)),
-        Ok(_) => state.error = Some("unexpected response to batch priority".to_string()),
-        Err(error) => state.error = Some(format!("priority: {}", error)),
+        Ok(Response::Ok) => Ok(count),
+        Ok(Response::Err(message)) => Err(message),
+        Ok(_) => Err("unexpected response to batch priority".to_string()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// live Content tab entry point: resolve the focused row from AppState and
+/// report the outcome through state.error.
+fn set_focused_priority(state: &mut AppState, priority: u8) {
+    let Some(torrent_index) = state.selected_torrent_index() else { return; };
+    let Some(detail) = &state.detail else { return; };
+    let Some(row) = focused_tree_row(
+        detail,
+        &state.collapsed_folders,
+        &state.content_filter_matches,
+        !state.content_filter.is_empty(),
+        &state.detail_files_state,
+    ) else { return; };
+    let result = apply_priority_to_row(torrent_index, detail, &row, priority);
+    match result {
+        Ok(0) => {}
+        Ok(count) => state.error = Some(format!("priority {} set on {} file(s)", priority, count)),
+        Err(message) => state.error = Some(format!("priority: {}", message)),
     }
     state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
 }
@@ -3166,28 +3282,6 @@ fn advance_priority_step(state: &mut AppState) {
 }
 
 fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
-    // rename-input mode — handle before filter/nav so esc cancels rename first
-    {
-        let Some(step) = state.priority_step.as_mut() else { return false; };
-        if step.rename_buffer.is_some() {
-            match (code, modifiers) {
-                (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
-                (KeyCode::Esc, _) => { step.rename_buffer = None; step.rename_target = None; }
-                (KeyCode::Enter, _) => { /* handled below — need to reborrow */ }
-                (KeyCode::Backspace, _) => { step.rename_buffer.as_mut().unwrap().pop(); }
-                (KeyCode::Char(character), modifiers)
-                    if !modifiers.contains(KeyModifiers::CONTROL)
-                        && !modifiers.contains(KeyModifiers::ALT) =>
-                { step.rename_buffer.as_mut().unwrap().push(character); }
-                _ => {}
-            }
-            // handle commit separately to avoid borrow issues
-            if code == KeyCode::Enter {
-                commit_priority_step_rename(state);
-            }
-            return false;
-        }
-    }
     // filter-input mode — handle before the navigation block so esc closes
     // the filter rather than skipping the torrent
     {
@@ -3225,11 +3319,17 @@ fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut 
             return false;
         }
         (KeyCode::Char('r'), KeyModifiers::NONE) | (KeyCode::F(2), _) => {
-            open_priority_step_rename(state);
+            open_priority_step_content_rename(state);
             return false;
         }
         (KeyCode::Char('t'), KeyModifiers::NONE) => {
-            open_priority_step_torrent_rename(state);
+            // rename the step's own torrent, not the list selection — the
+            // list cursor is unrelated to which torrent the step is showing
+            let Some(step) = state.priority_step.as_ref() else { return false; };
+            if let Some(torrent_index) = step.torrent_index() {
+                let name = step.detail.as_ref().map(|detail| detail.info.name.clone()).unwrap_or_default();
+                state.prompt = Some(build_torrent_rename_prompt(torrent_index, name));
+            }
             return false;
         }
         _ => {}
@@ -3277,80 +3377,20 @@ fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut 
     false
 }
 
-/// set priority on the focused row in the priority step — same cascading
-/// folder logic as set_focused_priority, but uses the step's own state.
+/// organize step entry point: resolve the focused row from the step's own
+/// detail/filter/selection state, then run the shared cascade.
 fn set_step_priority(step: &mut PriorityStep, priority: u8) {
     let Some(torrent_index) = step.torrent_index() else { return; };
-    let targets: Vec<usize> = {
-        let Some(detail) = &step.detail else { return; };
-        let rows = step.current_rows();
-        let Some(row) = step.files_state.selected().and_then(|i| rows.get(i)) else { return; };
-        if row.is_folder {
-            let prefix = format!("{}/", row.full_path);
-            detail.files.iter().enumerate()
-                .filter(|(_, file)| file.path == row.full_path || file.path.starts_with(&prefix))
-                .map(|(i, _)| i)
-                .collect()
-        } else if let Some(file_index) = row.file_index {
-            vec![file_index]
-        } else {
-            Vec::new()
-        }
-    };
-    if targets.is_empty() { return; }
-    let priorities = targets.iter().map(|&i| (i, priority)).collect();
-    let _ = client::send(Request::SetFilePrioritiesBatch { index: torrent_index, priorities });
-    step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL;
-}
-
-fn open_priority_step_rename(state: &mut AppState) {
-    let Some(step) = state.priority_step.as_mut() else { return; };
-    let rows = step.current_rows();
-    let Some(row) = step.files_state.selected().and_then(|i| rows.get(i)).cloned() else { return; };
-    if row.is_folder {
-        step.rename_target = Some(PriorityRenameTarget::Folder { old_prefix: row.full_path.clone() });
-        step.rename_buffer = Some(row.label.clone());
-    } else {
-        let file_index = match &step.detail {
-            Some(detail) => detail.files.iter().enumerate()
-                .find(|(_, file)| file.path == row.full_path)
-                .map(|(i, _)| i),
-            None => None,
-        };
-        let Some(file_index) = file_index else { return; };
-        // use just the filename component as the initial buffer
-        let filename = row.full_path.rsplit('/').next().unwrap_or(&row.full_path).to_string();
-        step.rename_target = Some(PriorityRenameTarget::File { file_index });
-        step.rename_buffer = Some(filename);
-    }
-}
-
-fn open_priority_step_torrent_rename(state: &mut AppState) {
-    let Some(step) = state.priority_step.as_mut() else { return; };
-    let name = step.detail.as_ref().map(|detail| detail.info.name.clone()).unwrap_or_default();
-    step.rename_target = Some(PriorityRenameTarget::Torrent);
-    step.rename_buffer = Some(name);
-}
-
-fn commit_priority_step_rename(state: &mut AppState) {
-    let Some(step) = state.priority_step.as_mut() else { return; };
-    let buffer = match step.rename_buffer.take() {
-        Some(b) => b,
-        None => return,
-    };
-    let target = match step.rename_target.take() {
-        Some(t) => t,
-        None => return,
-    };
-    let Some(torrent_index) = step.torrent_index() else { return; };
-    step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL;
-    match target {
-        PriorityRenameTarget::Torrent =>
-            { let _ = client::send(Request::RenameTorrent { index: torrent_index, new_name: buffer }); }
-        PriorityRenameTarget::File { file_index } =>
-            { let _ = client::send(Request::RenameFile { index: torrent_index, file_index, new_name: buffer }); }
-        PriorityRenameTarget::Folder { old_prefix } =>
-            { let _ = client::send(Request::RenameFolder { index: torrent_index, old_prefix, new_prefix: buffer, decisions: None }); }
+    let Some(detail) = &step.detail else { return; };
+    let Some(row) = focused_tree_row(
+        detail,
+        &step.collapsed_folders,
+        &step.filter_matches,
+        !step.filter.is_empty(),
+        &step.files_state,
+    ) else { return; };
+    if let Ok(count) = apply_priority_to_row(torrent_index, detail, &row, priority) {
+        if (count > 0) { step.last_poll = Instant::now() - DETAIL_POLL_INTERVAL; }
     }
 }
 
@@ -3404,6 +3444,13 @@ fn tab_complete_content_filter(state: &mut AppState) {
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.priority_step.is_some()) {
         draw_priority_step(frame, state);
+        // renames opened from inside the step use the shared prompt overlay
+        if (state.prompt.is_some()) {
+            draw_prompt(frame, state);
+        }
+        if (state.rename_confirm.is_some()) {
+            draw_rename_confirm(frame, state);
+        }
         return;
     }
     if (matches!(state.mode, Mode::Settings(_))) {
@@ -3525,18 +3572,8 @@ fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
         frame.render_stateful_widget(table, layout[2], &mut step.files_state);
     }
 
-    // filter/rename bar — rename takes priority
-    if let Some(rename_buf) = &step.rename_buffer {
-        let rename_line = Line::from(vec![
-            Span::styled(" rename ", Style::default().fg(Color::Black).bg(Color::Yellow)),
-            Span::raw(" "),
-            Span::raw(rename_buf.as_str()),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
-            Span::raw("   "),
-            Span::styled("esc cancel / enter confirm", Style::default().fg(Color::DarkGray)),
-        ]);
-        frame.render_widget(Paragraph::new(rename_line), layout[3]);
-    } else if step.filter_active {
+    // filter bar
+    if step.filter_active {
         let filter_line = Line::from(vec![
             Span::styled(" files ", Style::default().fg(Color::Black).bg(Color::Yellow)),
             Span::raw(" "),
