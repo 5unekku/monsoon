@@ -12,6 +12,7 @@ mod network;
 mod server;
 mod session;
 mod sources;
+mod textfield;
 mod tui;
 
 mod autostart;
