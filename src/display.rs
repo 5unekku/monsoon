@@ -99,6 +99,7 @@ fn print_torrent_detail(detail: &TorrentDetail) {
     println!("progress:      {}", format_progress_bar(info.progress, 40));
     println!("downloaded:    {} ({})", format_bytes(info.total_download), format_rate(info.download_rate));
     println!("uploaded:      {} ({})", format_bytes(info.total_upload), format_rate(info.upload_rate));
+    println!("ratio:         {:.2}", info.ratio);
     println!("peers:         {} connected / {} total", info.connected_peers, info.total_peers);
     println!("seeds:         {} connected / {} total", info.connected_seeds, info.total_seeds);
     println!("pieces:        {}/{}", info.num_completed_pieces, info.num_pieces);

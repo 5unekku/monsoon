@@ -19,6 +19,9 @@ pub struct TorrentInfo {
     pub total_done: i64,
     pub total_download: i64,
     pub total_upload: i64,
+    /// all-time payload upload / total done
+    #[serde(default)]
+    pub ratio: f64,
     pub num_pieces: i32,
     pub num_completed_pieces: i32,
     pub added_time: i64,
