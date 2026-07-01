@@ -25,7 +25,7 @@ use crate::ipc::{
     ContentLayout, FeedInfo, PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail,
     TorrentInfo, TrackerInfo,
 };
-use crate::textfield::longest_common_prefix_ci;
+use crate::textfield::{longest_common_prefix_ci, CompletionSource, TextField};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DETAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -3317,7 +3317,7 @@ fn tab_complete_content_filter(state: &mut AppState) {
 // temporary shim until prompts hold TextField directly (tasks 6-8):
 // route old whole-buffer completion through the shared textfield impl.
 fn tab_complete_path(buffer: &str) -> String {
-    let mut field = crate::textfield::TextField::with_completion(buffer, crate::textfield::CompletionSource::Filesystem);
+    let mut field = TextField::with_completion(buffer, CompletionSource::Filesystem);
     field.tab_complete();
     field.buffer().to_string()
 }
@@ -3733,6 +3733,23 @@ fn draw_column_picker(frame: &mut ratatui::Frame, state: &AppState) {
         ])),
         layout[2],
     );
+}
+
+/// render a TextField's buffer as spans with the cursor highlighted at its
+/// actual position, instead of always appending a block at the end. shared
+/// by every draw site so cursor rendering can't drift between them.
+fn render_field_with_cursor(field: &TextField) -> Vec<Span<'static>> {
+    let mut chars: Vec<char> = field.buffer().chars().collect();
+    let cursor = field.cursor().min(chars.len());
+    if (cursor == chars.len()) { chars.push(' '); }
+    let before: String = chars[..cursor].iter().collect();
+    let at: String = chars[cursor..=cursor].iter().collect();
+    let after: String = chars[cursor + 1..].iter().collect();
+    vec![
+        Span::raw(before),
+        Span::styled(at, Style::default().fg(Color::Black).bg(Color::Yellow)),
+        Span::raw(after),
+    ]
 }
 
 fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
