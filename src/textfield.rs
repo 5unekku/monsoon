@@ -108,6 +108,99 @@ impl TextField {
         let byte_end = self.byte_offset(boundary);
         self.buffer.replace_range(byte_start..byte_end, "");
     }
+
+    pub fn paste(&mut self, text: &str) {
+        for character in text.chars() {
+            if (character != '\n' && character != '\r') {
+                self.insert_char(character);
+            }
+        }
+    }
+
+    pub fn tab_complete(&mut self) {
+        match self.completion.clone() {
+            CompletionSource::None => {}
+            CompletionSource::Filesystem => self.tab_complete_filesystem(),
+            CompletionSource::SiblingFolders(candidates) => self.tab_complete_candidates(&candidates),
+        }
+    }
+
+    fn tab_complete_filesystem(&mut self) {
+        let byte_cursor = self.byte_offset(self.cursor);
+        let before = self.buffer[..byte_cursor].to_string();
+        let after = self.buffer[byte_cursor..].to_string();
+        let completed = complete_filesystem_path(&before);
+        if (completed == before) { return; }
+        self.cursor = completed.chars().count();
+        self.buffer = completed;
+        self.buffer.push_str(&after);
+    }
+
+    fn tab_complete_candidates(&mut self, candidates: &[String]) {
+        let prefix_lc = self.buffer.to_lowercase();
+        let matches: Vec<&str> = candidates.iter()
+            .map(|candidate| candidate.as_str())
+            .filter(|candidate| candidate.to_lowercase().starts_with(&prefix_lc))
+            .collect();
+        let completed = match matches.len() {
+            0 => return,
+            1 => matches[0].to_string(),
+            _ => longest_common_prefix_ci(&matches),
+        };
+        if (completed.chars().count() <= self.char_len()) { return; }
+        self.buffer = completed;
+        self.cursor = self.char_len();
+    }
+}
+
+/// expand `prefix` to the longest common prefix of all filesystem entries
+/// whose name starts with the partial name after the last `/` in `prefix`.
+/// `prefix` is everything before the cursor, not necessarily the whole
+/// buffer — `TextField::tab_complete_filesystem` splices the result back in
+/// front of whatever was after the cursor.
+fn complete_filesystem_path(prefix: &str) -> String {
+    let (dir_part, partial) = match prefix.rfind('/') {
+        None => (".", prefix),
+        Some(index) => (&prefix[..=index], &prefix[index + 1..]),
+    };
+    let Ok(entries) = std::fs::read_dir(dir_part) else { return prefix.to_string(); };
+    let partial_lc = partial.to_lowercase();
+    let mut candidates: Vec<String> = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if (!name.to_lowercase().starts_with(&partial_lc)) { return None; }
+            let is_dir = entry.file_type().map(|file_type| file_type.is_dir()).unwrap_or(false);
+            let candidate = if (dir_part == ".") {
+                if (is_dir) { format!("{}/", name) } else { name }
+            } else if (is_dir) {
+                format!("{}{}/", dir_part, name)
+            } else {
+                format!("{}{}", dir_part, name)
+            };
+            Some(candidate)
+        })
+        .collect();
+    candidates.sort();
+    match candidates.len() {
+        0 => prefix.to_string(),
+        1 => candidates.remove(0),
+        _ => longest_common_prefix_ci(&candidates.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+    }
+}
+
+pub fn longest_common_prefix_ci(paths: &[&str]) -> String {
+    let Some(first) = paths.first() else { return String::new(); };
+    let first_chars: Vec<char> = first.chars().collect();
+    let mut common = first_chars.len();
+    for path in &paths[1..] {
+        let count = first_chars.iter().zip(path.chars())
+            .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
+            .count();
+        common = common.min(count);
+        if (common == 0) { break; }
+    }
+    first_chars[..common].iter().collect()
 }
 
 fn is_word_char(character: char) -> bool {
@@ -239,6 +332,50 @@ mod tests {
         field.delete_word_forward();
         assert_eq!(field.buffer(), "foo/");
         assert_eq!(field.cursor(), 4);
+    }
+
+    #[test]
+    fn paste_inserts_at_cursor_and_strips_newlines() {
+        let mut field = TextField::new("ac");
+        field.set_cursor(1);
+        field.paste("b\nX\r\n");
+        assert_eq!(field.buffer(), "abXc");
+    }
+
+    #[test]
+    fn longest_common_prefix_ci_matches_case_insensitively() {
+        assert_eq!(longest_common_prefix_ci(&["Downloads/Foo", "downloads/Bar"]), "Downloads/");
+        assert_eq!(longest_common_prefix_ci(&[]), "");
+        assert_eq!(longest_common_prefix_ci(&["abc"]), "abc");
+    }
+
+    #[test]
+    fn filesystem_completion_only_expands_the_prefix_before_cursor() {
+        let temp_dir = std::env::temp_dir().join(format!("textfield-test-{}", std::process::id()));
+        std::fs::create_dir_all(temp_dir.join("downloads")).unwrap();
+        let mut field = TextField::with_completion(
+            format!("{}/down TAIL", temp_dir.display()),
+            CompletionSource::Filesystem,
+        );
+        let prefix_char_len = format!("{}/down", temp_dir.display()).chars().count();
+        field.set_cursor(prefix_char_len);
+        field.tab_complete();
+        assert!(field.buffer().starts_with(&format!("{}/downloads/", temp_dir.display())));
+        assert!(field.buffer().ends_with(" TAIL"));
+        std::fs::remove_dir_all(&temp_dir).ok();
+    }
+
+    #[test]
+    fn empty_buffer_operations_do_not_panic() {
+        let mut field = TextField::new("");
+        field.backspace();
+        field.delete_forward();
+        field.delete_word_backward();
+        field.delete_word_forward();
+        field.move_word_left();
+        field.move_word_right();
+        assert_eq!(field.buffer(), "");
+        assert_eq!(field.cursor(), 0);
     }
 
     #[test]

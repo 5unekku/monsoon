@@ -25,6 +25,7 @@ use crate::ipc::{
     ContentLayout, FeedInfo, PeerInfo as IpcPeerInfo, Request, Response, StatsInfo, TorrentDetail,
     TorrentInfo, TrackerInfo,
 };
+use crate::textfield::longest_common_prefix_ci;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 const DETAIL_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -3313,52 +3314,12 @@ fn tab_complete_content_filter(state: &mut AppState) {
     }
 }
 
-// expand `buffer` to the longest common prefix of all filesystem entries
-// that start with the partial name after the last `/`.
+// temporary shim until prompts hold TextField directly (tasks 6-8):
+// route old whole-buffer completion through the shared textfield impl.
 fn tab_complete_path(buffer: &str) -> String {
-    let (dir_part, prefix) = match buffer.rfind('/') {
-        None => (".", ""),
-        Some(index) => (&buffer[..=index], &buffer[index + 1..]),
-    };
-    let Ok(entries) = std::fs::read_dir(dir_part) else { return buffer.to_string(); };
-    let prefix_lc = prefix.to_lowercase();
-    let mut candidates: Vec<String> = entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if !name.to_lowercase().starts_with(&prefix_lc) { return None; }
-            let is_dir = entry.file_type().map(|file_type| file_type.is_dir()).unwrap_or(false);
-            let candidate = if dir_part == "." {
-                if is_dir { format!("{}/", name) } else { name }
-            } else {
-                if is_dir { format!("{}{}/", dir_part, name) } else { format!("{}{}", dir_part, name) }
-            };
-            Some(candidate)
-        })
-        .collect();
-    candidates.sort();
-    match candidates.len() {
-        0 => buffer.to_string(),
-        1 => candidates.remove(0),
-        _ => {
-            let refs: Vec<&str> = candidates.iter().map(|s| s.as_str()).collect();
-            longest_common_prefix_ci(&refs)
-        }
-    }
-}
-
-fn longest_common_prefix_ci(paths: &[&str]) -> String {
-    let Some(first) = paths.first() else { return String::new(); };
-    let first_chars: Vec<char> = first.chars().collect();
-    let mut common = first_chars.len();
-    for path in &paths[1..] {
-        let count = first_chars.iter().zip(path.chars())
-            .take_while(|(a, b)| a.to_lowercase().eq(b.to_lowercase()))
-            .count();
-        common = common.min(count);
-        if common == 0 { break; }
-    }
-    first_chars[..common].iter().collect()
+    let mut field = crate::textfield::TextField::with_completion(buffer, crate::textfield::CompletionSource::Filesystem);
+    field.tab_complete();
+    field.buffer().to_string()
 }
 
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
