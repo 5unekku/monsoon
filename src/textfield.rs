@@ -366,6 +366,46 @@ mod tests {
     }
 
     #[test]
+    fn sibling_folder_completion_single_match() {
+        let mut field = TextField::with_completion(
+            "Sea",
+            CompletionSource::SiblingFolders(vec!["Season 1".to_string(), "Extras".to_string()]),
+        );
+        field.tab_complete();
+        assert_eq!(field.buffer(), "Season 1");
+    }
+
+    #[test]
+    fn sibling_folder_completion_case_insensitive() {
+        let mut field = TextField::with_completion(
+            "sea",
+            CompletionSource::SiblingFolders(vec!["Season 1".to_string()]),
+        );
+        field.tab_complete();
+        assert_eq!(field.buffer(), "Season 1");
+    }
+
+    #[test]
+    fn sibling_folder_completion_multiple_matches_uses_common_prefix() {
+        let mut field = TextField::with_completion(
+            "Sea",
+            CompletionSource::SiblingFolders(vec!["Season 1".to_string(), "Season 2".to_string()]),
+        );
+        field.tab_complete();
+        assert_eq!(field.buffer(), "Season ");
+    }
+
+    #[test]
+    fn sibling_folder_completion_no_match_is_noop() {
+        let mut field = TextField::with_completion(
+            "Zzz",
+            CompletionSource::SiblingFolders(vec!["Season 1".to_string()]),
+        );
+        field.tab_complete();
+        assert_eq!(field.buffer(), "Zzz");
+    }
+
+    #[test]
     fn empty_buffer_operations_do_not_panic() {
         let mut field = TextField::new("");
         field.backspace();
