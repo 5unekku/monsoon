@@ -699,7 +699,7 @@ struct SettingsState {
     /// index into the unique sections list (the "tabs")
     current_tab: usize,
     /// when Some, an inline editor for the selected field's value is active
-    edit_buffer: Option<String>,
+    edit_buffer: Option<TextField>,
     /// last action outcome (success message or daemon error)
     status: Option<String>,
     /// scroll offset for the settings body (in terms of display lines)
@@ -5052,19 +5052,45 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
     // active text editor — capture printable input, commit on enter, cancel on esc
     if (settings.edit_buffer.is_some()) {
         match (code, modifiers) {
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Esc, _) => settings.edit_buffer = None,
             (KeyCode::Enter, _) => {
-                let buffer = settings.edit_buffer.take().unwrap_or_default();
+                let buffer = settings.edit_buffer.take().map(|field| field.buffer().to_string()).unwrap_or_default();
                 commit_edit(settings, &buffer);
             }
+            (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Left, KeyModifiers::ALT) => {
+                if let Some(field) = settings.edit_buffer.as_mut() { field.move_word_left(); }
+            }
+            (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::ALT) => {
+                if let Some(field) = settings.edit_buffer.as_mut() { field.move_word_right(); }
+            }
+            (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
+                if let Some(field) = settings.edit_buffer.as_mut() { field.delete_word_backward(); }
+            }
+            (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Delete, KeyModifiers::ALT) => {
+                if let Some(field) = settings.edit_buffer.as_mut() { field.delete_word_forward(); }
+            }
+            (KeyCode::Left, _) => { if let Some(field) = settings.edit_buffer.as_mut() { field.move_left(); } }
+            (KeyCode::Right, _) => { if let Some(field) = settings.edit_buffer.as_mut() { field.move_right(); } }
+            (KeyCode::Home, _) => { if let Some(field) = settings.edit_buffer.as_mut() { field.move_home(); } }
+            (KeyCode::End, _) => { if let Some(field) = settings.edit_buffer.as_mut() { field.move_end(); } }
+            (KeyCode::Delete, _) => { if let Some(field) = settings.edit_buffer.as_mut() { field.delete_forward(); } }
             (KeyCode::Backspace, _) => {
-                if let Some(buffer) = settings.edit_buffer.as_mut() { buffer.pop(); }
+                if let Some(field) = settings.edit_buffer.as_mut() { field.backspace(); }
+            }
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                if let (Ok(mut clipboard), Some(field)) = (arboard::Clipboard::new(), settings.edit_buffer.as_mut()) {
+                    if let Ok(text) = clipboard.get_text() { field.paste(&text); }
+                }
+            }
+            (KeyCode::Tab, _) => {
+                if let Some(field) = settings.edit_buffer.as_mut() { field.tab_complete(); }
             }
             (KeyCode::Char(character), modifiers)
                 if !modifiers.contains(KeyModifiers::CONTROL)
                     && !modifiers.contains(KeyModifiers::ALT) =>
             {
-                if let Some(buffer) = settings.edit_buffer.as_mut() { buffer.push(character); }
+                if let Some(field) = settings.edit_buffer.as_mut() { field.insert_char(character); }
             }
             _ => {}
         }
@@ -5151,7 +5177,7 @@ fn handle_interface_picker_key(code: KeyCode, _modifiers: KeyModifiers, settings
             let key = settings.current_field().key;
             if (value == "__specific__") {
                 // drop into the text editor seeded with the current raw value
-                settings.edit_buffer = Some(config_value_string(&settings.config, key));
+                settings.edit_buffer = Some(TextField::new(config_value_string(&settings.config, key)));
             } else {
                 commit_value(settings, key, &value);
             }
@@ -5178,7 +5204,13 @@ fn activate_field(settings: &mut SettingsState) {
         | FieldKind::IntegerUnlimited
         | FieldKind::Float
         | FieldKind::Text => {
-            settings.edit_buffer = Some(current);
+            // only the save-path field is an actual filesystem path today
+            let completion = if (field.key == "default_save_path") {
+                CompletionSource::Filesystem
+            } else {
+                CompletionSource::None
+            };
+            settings.edit_buffer = Some(TextField::with_completion(current, completion));
         }
         FieldKind::Interface => {
             let mut picker = InterfacePickerState::build();
@@ -5412,20 +5444,24 @@ fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut Set
             }
         } else {
             let value = config_value_string(&settings.config, field.key);
-            let display_value = render_value(settings, *index, &value);
-            let value_style = if (settings.edit_buffer.is_some() && is_selected) {
-                Style::default().fg(Color::Black).bg(Color::Yellow)
-            } else if (is_selected) {
-                Style::default().fg(Color::Cyan)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
             let mut spans = vec![
                 Span::styled(marker, Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:32}", field.label), label_style),
                 Span::raw("  "),
-                Span::styled(display_value, value_style),
             ];
+            if let (Some(edit_field), true) = (settings.edit_buffer.as_ref(), is_selected) {
+                spans.push(Span::styled("[ ", Style::default().fg(Color::Yellow)));
+                spans.extend(render_field_with_cursor(edit_field));
+                spans.push(Span::styled(" ]", Style::default().fg(Color::Yellow)));
+            } else {
+                let display_value = render_value(*index, &value);
+                let value_style = if (is_selected) {
+                    Style::default().fg(Color::Cyan)
+                } else {
+                    Style::default().fg(Color::Gray)
+                };
+                spans.push(Span::styled(display_value, value_style));
+            }
             if (field.restart_required) {
                 spans.push(Span::styled(
                     "  ⟳ restart",
@@ -5458,11 +5494,7 @@ fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut Set
     frame.render_widget(paragraph, area);
 }
 
-fn render_value(settings: &SettingsState, index: usize, value: &str) -> String {
-    if (settings.edit_buffer.is_some() && index == settings.selected) {
-        let buffer = settings.edit_buffer.as_deref().unwrap_or("");
-        return format!("[ {}_ ]", buffer);
-    }
+fn render_value(index: usize, value: &str) -> String {
     let field = &SETTING_FIELDS[index];
     match field.kind {
         FieldKind::Choice(options) => {
