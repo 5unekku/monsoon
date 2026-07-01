@@ -38,6 +38,11 @@ struct ManagedTorrent {
     /// resolved content layout still to apply once the torrent is verified.
     /// None = nothing pending (already laid out, or IfMultiple no-op).
     pending_layout: Option<crate::ipc::ContentLayout>,
+    /// snapshot of every file's path, taken once when the add-time organize
+    /// step concludes (see `Request::FinalizeAdd`). `None` until that
+    /// happens. used by `Request::RevertToDefaultLayout` to undo any renames
+    /// made after that point.
+    default_layout: Option<Vec<String>>,
 }
 
 /// persisted record of a known torrent so the daemon can reload it on restart
@@ -57,6 +62,8 @@ struct TorrentRecord {
     display_name: Option<String>,
     #[serde(default)]
     pending_layout: Option<crate::ipc::ContentLayout>,
+    #[serde(default)]
+    default_layout: Option<Vec<String>>,
 }
 
 pub struct App {
@@ -165,6 +172,7 @@ impl App {
                         display_name: record.display_name,
                         was_finished: false,
                         pending_layout: record.pending_layout,
+                        default_layout: record.default_layout,
                     });
                 }
                 Err(error) => tracing::warn!("failed to resume {}: {}", record.info_hash, error),
@@ -184,6 +192,7 @@ impl App {
             interface_override: torrent.interface_override.clone(),
             display_name: torrent.display_name.clone(),
             pending_layout: torrent.pending_layout,
+            default_layout: torrent.default_layout.clone(),
         }).collect();
         if let Ok(list_path) = Config::torrent_list_path() {
             if let Ok(json) = serde_json::to_string(&records) {
@@ -252,6 +261,7 @@ impl App {
             display_name: None,
             was_finished: false,
             pending_layout,
+            default_layout: None,
         });
         self.persist_torrent_list();
         Ok(info_hash)
@@ -299,6 +309,7 @@ impl App {
             display_name: None,
             was_finished: false,
             pending_layout,
+            default_layout: None,
         });
         self.persist_torrent_list();
         Ok(info_hash)
@@ -722,8 +733,6 @@ impl App {
         new_prefix: &str,
         decisions: Option<crate::ipc::RenameDecisions>,
     ) -> Result<crate::ipc::Response> {
-        use crate::ipc::Response;
-
         let torrent = self.torrents.get(index)
             .ok_or_else(|| anyhow::anyhow!("invalid index: {}", index))?;
 
@@ -767,6 +776,37 @@ impl App {
             return Err(anyhow::anyhow!("no files matched prefix: {}", old_prefix));
         }
 
+        self.analyze_and_commit_rename_plan(
+            index,
+            plan,
+            rejected,
+            vec![(trimmed_old.to_string(), trimmed_new.to_string())],
+            decisions,
+        )
+    }
+
+    /// given an already-computed rename plan (file_index -> new path), any
+    /// per-file rejections found while building it, and the folder moves the
+    /// plan represents (old dir prefix -> new dir prefix, used for the
+    /// merge/untracked scans), run the full collision/merge/untracked
+    /// analysis and, if nothing needs a decision, commit the renames. shared
+    /// by `rename_folder` (plan = prefix rewrite) and
+    /// `revert_to_default_layout` (plan = diff against the stored snapshot)
+    /// so the two can never diverge on what counts as a conflict.
+    fn analyze_and_commit_rename_plan(
+        &self,
+        index: usize,
+        plan: Vec<(usize, String)>,
+        rejected: Vec<(usize, String)>,
+        folder_moves: Vec<(String, String)>,
+        decisions: Option<crate::ipc::RenameDecisions>,
+    ) -> Result<crate::ipc::Response> {
+        use crate::ipc::Response;
+
+        let torrent = self.torrents.get(index)
+            .ok_or_else(|| anyhow::anyhow!("invalid index: {}", index))?;
+        let files = torrent.handle.files();
+
         // collision check against files that aren't being renamed in this batch
         let renaming_indices: std::collections::HashSet<usize> =
             plan.iter().map(|(file_index, _)| *file_index).collect();
@@ -775,33 +815,20 @@ impl App {
             .map(|(_, file)| file.path.as_str())
             .collect();
 
-        // the target prefix itself must not be an existing file path — that
-        // would make a name simultaneously a file and a directory prefix.
-        // merging INTO an existing folder (where the prefix is already used
-        // as a dir by other files) is explicitly allowed.
-        if (static_files.contains(&trimmed_new)) {
-            return Err(anyhow::anyhow!(
-                "\"{}\" is already a file path — cannot use it as a folder",
-                trimmed_new
-            ));
+        // a target prefix must not be an existing file path — that would
+        // make a name simultaneously a file and a directory prefix. merging
+        // INTO an existing folder (where the prefix is already used as a dir
+        // by other files) is explicitly allowed.
+        for (_, new_prefix) in &folder_moves {
+            if (static_files.contains(&new_prefix.as_str())) {
+                return Err(anyhow::anyhow!(
+                    "\"{}\" is already a file path — cannot use it as a folder",
+                    new_prefix
+                ));
+            }
         }
 
-        // check both intra-batch and against-the-rest collisions. merging is
-        // allowed: coexisting files in the same destination folder are fine;
-        // only file-vs-file exact path collisions are rejected.
-        let mut planned_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut filtered_plan: Vec<(usize, String)> = Vec::new();
-        for (file_index, new_path) in plan {
-            if (static_files.contains(&new_path.as_str())) {
-                rejected.push((file_index, format!("would collide with existing file: {}", new_path)));
-                continue;
-            }
-            if (!planned_targets.insert(new_path.clone())) {
-                rejected.push((file_index, format!("two files would rename to same target: {}", new_path)));
-                continue;
-            }
-            filtered_plan.push((file_index, new_path));
-        }
+        let (filtered_plan, rejected) = filter_rename_plan(&static_files, plan, rejected);
 
         // file-on-file conflicts are never auto-merged. reject the whole
         // operation and tell the user to rename the conflicting file first.
@@ -815,14 +842,35 @@ impl App {
         let tracked: std::collections::HashSet<String> = files.iter().map(|file| file.path.clone()).collect();
         let save_root = std::path::Path::new(&torrent.save_path);
 
-        let merge_same = folder_merge_same(&static_files.iter().map(|s| s.to_string()).collect::<Vec<_>>(), trimmed_new);
+        let static_owned: Vec<String> = static_files.iter().map(|path| path.to_string()).collect();
+        let merge_same = folder_moves.iter()
+            .any(|(_, new_prefix)| folder_merge_same(&static_owned, new_prefix));
 
-        let dest_dir = save_root.join(trimmed_new);
-        let unrelated_in_dest = scan_unrelated_in_dir(&dest_dir, &tracked, save_root);
+        let mut unrelated_in_dest: Vec<std::path::PathBuf> = Vec::new();
+        let mut scanned_dests: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (_, new_prefix) in &folder_moves {
+            if (scanned_dests.insert(new_prefix.as_str())) {
+                unrelated_in_dest.extend(scan_unrelated_in_dir(&save_root.join(new_prefix), &tracked, save_root));
+            }
+        }
         let merge_unrelated = !unrelated_in_dest.is_empty();
 
-        let source_dir = save_root.join(trimmed_old);
-        let untracked_in_source = scan_unrelated_in_dir(&source_dir, &tracked, save_root);
+        // untracked files found in each vacated source dir, paired with the
+        // destination its tracked files are moving to so an approved Move
+        // decision knows where to put them.
+        // ponytail: when one source feeds several destinations, the first
+        // mapping wins for untracked moves.
+        let mut untracked_moves: Vec<(std::path::PathBuf, std::path::PathBuf, Vec<std::path::PathBuf>)> = Vec::new();
+        let mut untracked_count = 0usize;
+        let mut scanned_sources: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for (old_prefix, new_prefix) in &folder_moves {
+            if (!scanned_sources.insert(old_prefix.as_str())) { continue; }
+            let source_dir = save_root.join(old_prefix);
+            let found = scan_unrelated_in_dir(&source_dir, &tracked, save_root);
+            if (found.is_empty()) { continue; }
+            untracked_count += found.len();
+            untracked_moves.push((source_dir, save_root.join(new_prefix), found));
+        }
 
         let mut needs: Vec<crate::ipc::RenameConcern> = Vec::new();
         let mut approved_merge_same = true;
@@ -832,23 +880,23 @@ impl App {
         if (merge_same) {
             match (self.config.rename_merge_same.as_str(), decisions) {
                 ("always", _) => {}
-                (_, Some(d)) => approved_merge_same = d.merge_same,
+                (_, Some(decision)) => approved_merge_same = decision.merge_same,
                 (_, None) => needs.push(crate::ipc::RenameConcern::MergeSame),
             }
         }
         if (merge_unrelated) {
             match (self.config.rename_merge_unrelated.as_str(), decisions) {
                 ("always", _) => {}
-                (_, Some(d)) => approved_merge_unrelated = d.merge_unrelated,
+                (_, Some(decision)) => approved_merge_unrelated = decision.merge_unrelated,
                 (_, None) => needs.push(crate::ipc::RenameConcern::MergeUnrelated { unrelated_count: unrelated_in_dest.len() }),
             }
         }
-        if (!untracked_in_source.is_empty()) {
+        if (untracked_count > 0) {
             match (self.config.rename_untracked_files.as_str(), decisions) {
                 ("always_move", _) => untracked_choice = crate::ipc::UntrackedChoice::Move,
                 ("always_leave", _) => untracked_choice = crate::ipc::UntrackedChoice::Leave,
-                (_, Some(d)) => untracked_choice = d.untracked,
-                (_, None) => needs.push(crate::ipc::RenameConcern::UntrackedFiles { count: untracked_in_source.len() }),
+                (_, Some(decision)) => untracked_choice = decision.untracked,
+                (_, None) => needs.push(crate::ipc::RenameConcern::UntrackedFiles { count: untracked_count }),
             }
         }
 
@@ -862,18 +910,20 @@ impl App {
 
         // move untracked files first (independent of libtorrent's async renames)
         if (matches!(untracked_choice, crate::ipc::UntrackedChoice::Move)) {
-            let _ = std::fs::create_dir_all(&dest_dir);
-            for source in &untracked_in_source {
-                if let Ok(relative) = source.strip_prefix(&source_dir) {
-                    let target = dest_dir.join(relative);
-                    if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
-                    // skip rather than silently overwrite — caller must resolve conflicts manually
-                    if (target.exists()) {
-                        tracing::warn!(target = %target.display(), "untracked move skipped: destination already exists");
-                        continue;
-                    }
-                    if let Err(error) = std::fs::rename(source, &target) {
-                        tracing::warn!(source = %source.display(), "untracked move failed: {}", error);
+            for (source_dir, dest_dir, found) in &untracked_moves {
+                let _ = std::fs::create_dir_all(dest_dir);
+                for source in found {
+                    if let Ok(relative) = source.strip_prefix(source_dir) {
+                        let target = dest_dir.join(relative);
+                        if let Some(parent) = target.parent() { let _ = std::fs::create_dir_all(parent); }
+                        // skip rather than silently overwrite — caller must resolve conflicts manually
+                        if (target.exists()) {
+                            tracing::warn!(target = %target.display(), "untracked move skipped: destination already exists");
+                            continue;
+                        }
+                        if let Err(error) = std::fs::rename(source, &target) {
+                            tracing::warn!(source = %source.display(), "untracked move failed: {}", error);
+                        }
                     }
                 }
             }
@@ -885,11 +935,55 @@ impl App {
             tracing::info!(torrent = %torrent.info_hash, file_index, new_name = %new_path, "submitted rename (folder)");
             renamed.push(file_index);
         }
-        // best-effort: the now-empty source dir is removed opportunistically;
+        // best-effort: the now-empty source dirs are removed opportunistically;
         // libtorrent's renames complete asynchronously, so this may fail the
         // first time and is retried by a later rename or left to the user.
-        let _ = std::fs::remove_dir(&source_dir);
+        for (old_prefix, _) in &folder_moves {
+            let _ = std::fs::remove_dir(save_root.join(old_prefix));
+        }
         Ok(Response::RenameResult { renamed, rejected: Vec::new() })
+    }
+
+    /// undo every rename made since the torrent's default_layout snapshot was
+    /// taken, restoring its original file structure. atomic: any single
+    /// hard-conflicting file rejects the entire revert.
+    fn revert_to_default_layout(
+        &self,
+        index: usize,
+        decisions: Option<crate::ipc::RenameDecisions>,
+    ) -> Result<crate::ipc::Response> {
+        let torrent = self.torrents.get(index)
+            .ok_or_else(|| anyhow::anyhow!("invalid index: {}", index))?;
+        let Some(default_layout) = torrent.default_layout.clone() else {
+            return Err(anyhow::anyhow!("no default layout recorded for this torrent"));
+        };
+        let current: Vec<String> = torrent.handle.files().iter().map(|file| file.path.clone()).collect();
+        let plan = crate::layout::compute_revert_plan(&current, &default_layout);
+        if (plan.is_empty()) {
+            return Ok(crate::ipc::Response::Ok);
+        }
+        let folder_moves = derive_folder_moves(&plan, &current);
+        self.analyze_and_commit_rename_plan(index, plan, Vec::new(), folder_moves, decisions)
+    }
+
+    /// conclude the add-time organize step: snapshot the current file paths
+    /// as the torrent's default layout (written only once, even if the client
+    /// re-sends), then optionally resume it.
+    fn finalize_add(&mut self, index: usize, resume: bool) -> Result<()> {
+        let torrent = self.torrents.get_mut(index)
+            .ok_or_else(|| anyhow::anyhow!("invalid index: {}", index))?;
+        if (torrent.default_layout.is_none()) {
+            let paths: Vec<String> = torrent.handle.files().iter().map(|file| file.path.clone()).collect();
+            torrent.default_layout = Some(paths);
+        }
+        if (resume) {
+            // clear so check_seed_limits doesn't immediately re-pause
+            self.seed_limit_acted.remove(&torrent.info_hash);
+            torrent.handle.resume();
+            torrent.handle.submit_save_resume_data();
+        }
+        self.persist_torrent_list();
+        Ok(())
     }
 
     /// load an ip filter (PeerGuardian or CIDR) from disk if configured.
@@ -1186,6 +1280,15 @@ impl App {
                 Ok(response) => response,
                 Err(error) => Response::Err(error.to_string()),
             },
+            Request::FinalizeAdd { index, resume } => match self.finalize_add(index, resume) {
+                Ok(_) => Response::Ok,
+                Err(error) => Response::Err(error.to_string()),
+            },
+            Request::RevertToDefaultLayout { index, decisions } =>
+                match self.revert_to_default_layout(index, decisions) {
+                    Ok(response) => response,
+                    Err(error) => Response::Err(error.to_string()),
+                },
             Request::Reannounce { index } => match self.torrents.get(index) {
                 None => Response::Err(format!("invalid index: {}", index)),
                 Some(torrent) => { torrent.handle.force_reannounce(); Response::Ok }
@@ -1448,6 +1551,59 @@ fn bridge_peer_to_ipc(peer: ffi::PeerInfo) -> PeerInfo {
 
 fn parse_bool(value: &str) -> bool {
     matches!(value, "true" | "1" | "yes")
+}
+
+/// filter a rename plan against paths that aren't part of the batch. exact
+/// file-on-file collisions and duplicate targets are moved to `rejected`;
+/// any rejection means the caller must abort the whole batch.
+fn filter_rename_plan(
+    static_files: &[&str],
+    plan: Vec<(usize, String)>,
+    mut rejected: Vec<(usize, String)>,
+) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
+    // check both intra-batch and against-the-rest collisions. merging is
+    // allowed: coexisting files in the same destination folder are fine;
+    // only file-vs-file exact path collisions are rejected.
+    let mut planned_targets: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut filtered: Vec<(usize, String)> = Vec::new();
+    for (file_index, new_path) in plan {
+        if (static_files.contains(&new_path.as_str())) {
+            rejected.push((file_index, format!("would collide with existing file: {}", new_path)));
+            continue;
+        }
+        if (!planned_targets.insert(new_path.clone())) {
+            rejected.push((file_index, format!("two files would rename to same target: {}", new_path)));
+            continue;
+        }
+        filtered.push((file_index, new_path));
+    }
+    (filtered, rejected)
+}
+
+/// derive the folder moves a diff-computed rename plan represents: one
+/// (old dir, new dir) pair per file whose parent directory changes, reduced
+/// to topmost source dirs so recursive scans don't double-count. moves
+/// touching the save root (empty prefix) are skipped: scanning the whole
+/// save path would flag every other torrent's files as unrelated.
+/// ponytail: a source nested under another kept source is dropped even when
+/// it maps to a different destination; split the revert manually in that corner.
+fn derive_folder_moves(plan: &[(usize, String)], current: &[String]) -> Vec<(String, String)> {
+    let parent_of = |path: &str| path.rsplit_once('/').map(|(parent, _)| parent.to_string()).unwrap_or_default();
+    let mut moves: Vec<(String, String)> = Vec::new();
+    for (file_index, new_path) in plan {
+        let Some(old_path) = current.get(*file_index) else { continue; };
+        let entry = (parent_of(old_path), parent_of(new_path));
+        if (entry.0.is_empty() || entry.1.is_empty() || entry.0 == entry.1) { continue; }
+        if (!moves.contains(&entry)) { moves.push(entry); }
+    }
+    moves.sort();
+    let mut top_moves: Vec<(String, String)> = Vec::new();
+    for (source, dest) in moves {
+        let nested = top_moves.iter()
+            .any(|(kept, _)| source == *kept || source.starts_with(&format!("{}/", kept)));
+        if (!nested) { top_moves.push((source, dest)); }
+    }
+    top_moves
 }
 
 /// true if any file that isn't part of this rename already lives under
@@ -2101,5 +2257,48 @@ mod rename_tests {
         found.sort();
         assert_eq!(found, vec!["stray.txt".to_string(), "sub/stray2.txt".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn revert_plan_collision_rejects_whole_batch() {
+        // file 0 could go back cleanly, but file 1's default path is occupied
+        // by a file that isn't part of the batch. one hard conflict must
+        // surface as a rejection, which makes analyze_and_commit_rename_plan
+        // return a wholesale reject before submitting anything.
+        let current = vec![
+            "Show/a_renamed.mkv".to_string(),
+            "Show/b_renamed.mkv".to_string(),
+            "Show/keep.mkv".to_string(),
+        ];
+        let default_layout = vec![
+            "Show/a.mkv".to_string(),
+            "Show/keep.mkv".to_string(),
+            "Show/keep.mkv".to_string(),
+        ];
+        let plan = crate::layout::compute_revert_plan(&current, &default_layout);
+        assert_eq!(plan, vec![(0, "Show/a.mkv".to_string()), (1, "Show/keep.mkv".to_string())]);
+
+        let static_files = vec!["Show/keep.mkv"];
+        let (filtered, rejected) = filter_rename_plan(&static_files, plan, Vec::new());
+        assert_eq!(rejected, vec![(1, "would collide with existing file: Show/keep.mkv".to_string())]);
+        // the clean sibling survives filtering but is never submitted: any
+        // rejection aborts the whole batch
+        assert_eq!(filtered, vec![(0, "Show/a.mkv".to_string())]);
+    }
+
+    #[test]
+    fn derive_folder_moves_reduces_to_topmost_source() {
+        let current = vec![
+            "Show2/a.mkv".to_string(),
+            "Show2/Sub/b.mkv".to_string(),
+            "Show2/c_renamed.mkv".to_string(),
+        ];
+        let plan = vec![
+            (0, "Show/a.mkv".to_string()),
+            (1, "Show/Sub/b.mkv".to_string()),
+            (2, "Show2/c.mkv".to_string()),
+        ];
+        // entry 2 stays in the same directory, so it contributes no move
+        assert_eq!(derive_folder_moves(&plan, &current), vec![("Show2".to_string(), "Show".to_string())]);
     }
 }

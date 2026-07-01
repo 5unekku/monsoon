@@ -122,6 +122,18 @@ pub enum Request {
     /// move the entire torrent's save directory. async — libtorrent emits
     /// storage_moved_alert / storage_moved_failed_alert.
     Move { index: usize, new_save_path: String, #[serde(default)] decisions: Option<RenameDecisions> },
+    /// conclude a torrent's add-time organize step: snapshot its current file
+    /// paths as the "default layout" (only ever written once, here), then
+    /// resume it when `resume` is true. `resume` carries the originally
+    /// requested start/pause option through from the add-options form.
+    FinalizeAdd { index: usize, resume: bool },
+    /// undo every rename made since the torrent's default_layout snapshot was
+    /// taken, restoring its original file structure. can touch many files at
+    /// once; the whole operation is atomic (any single hard-conflicting file
+    /// rejects the entire revert). same two-phase shape as RenameFolder/Move:
+    /// a first call without `decisions` may get back
+    /// Response::RenameConfirmation; resend with `decisions` filled in to commit.
+    RevertToDefaultLayout { index: usize, #[serde(default)] decisions: Option<RenameDecisions> },
     /// force tracker announce immediately (bypass the regular interval)
     Reannounce { index: usize },
     /// set the download priority for a single file. 0 = skip, 1..=7 = normal..high.
