@@ -1050,6 +1050,9 @@ struct AddOptionsForm {
 struct PriorityStep {
     entries: Vec<String>,   // source URIs (for display), parallel to indices
     indices: Vec<usize>,    // torrent indices in the daemon's list
+    /// per-entry: resume the torrent (matches the originally-requested
+    /// `start` option) once its organize step concludes.
+    resume_on_finish: Vec<bool>,
     current: usize,
     detail: Option<TorrentDetail>,
     /// lowercased file paths, rebuilt on each detail poll
@@ -1064,12 +1067,13 @@ struct PriorityStep {
 }
 
 impl PriorityStep {
-    fn new(entries: Vec<String>, indices: Vec<usize>) -> Self {
+    fn new(entries: Vec<String>, indices: Vec<usize>, resume_on_finish: Vec<bool>) -> Self {
         let mut files_state = TableState::default();
         files_state.select(Some(0));
         Self {
             entries,
             indices,
+            resume_on_finish,
             current: 0,
             detail: None,
             paths_lc: Vec::new(),
@@ -2424,16 +2428,21 @@ fn advance_add_options(state: &mut AppState) {
 fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
     let mut succeeded: usize = 0;
     let mut failures: Vec<String> = Vec::new();
-    let mut paused_indices: Vec<usize> = Vec::new();
-    let mut paused_entries: Vec<String> = Vec::new();
+    let mut organize_indices: Vec<usize> = Vec::new();
+    let mut organize_entries: Vec<String> = Vec::new();
+    let mut organize_resume: Vec<bool> = Vec::new();
     for (entry_index, uri) in form.entries.iter().enumerate() {
         let options = &form.options[entry_index];
         let save_path = if (options.save_path.trim().is_empty()) { None } else { Some(options.save_path.clone()) };
+        // always add paused: the organize step must run before any data
+        // downloads, regardless of the user's requested start/pause option.
+        // `options.start` is remembered below and applied once the step
+        // concludes for this entry.
         let added_id = match client::send(Request::Add {
             uri: uri.clone(),
             save_path,
             category: None,
-            start_paused: !options.start,
+            start_paused: true,
             content_layout: options.content_layout,
         }) {
             Ok(Response::Added { id }) => Some(id),
@@ -2443,23 +2452,19 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         };
         if (added_id.is_none()) { continue; }
         succeeded += 1;
-        // do the List roundtrip whenever we need the new index
-        if (options.sequential || options.first_last || !options.start) {
-            let new_index = match client::send(Request::List) {
-                Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
-                _ => continue,
-            };
-            if (options.sequential) {
-                let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
-            }
-            if (options.first_last) {
-                let _ = client::send(Request::SetFirstLastPriority { index: new_index, enabled: true });
-            }
-            if (!options.start) {
-                paused_indices.push(new_index);
-                paused_entries.push(uri.clone());
-            }
+        let new_index = match client::send(Request::List) {
+            Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
+            _ => continue,
+        };
+        if (options.sequential) {
+            let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
         }
+        if (options.first_last) {
+            let _ = client::send(Request::SetFirstLastPriority { index: new_index, enabled: true });
+        }
+        organize_indices.push(new_index);
+        organize_entries.push(uri.clone());
+        organize_resume.push(options.start);
     }
     if (failures.is_empty()) {
         state.error = Some(format!("added {} torrent(s)", succeeded));
@@ -2472,8 +2477,8 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         ));
     }
     state.last_poll = Instant::now() - POLL_INTERVAL;
-    if (!paused_indices.is_empty()) {
-        state.priority_step = Some(Box::new(PriorityStep::new(paused_entries, paused_indices)));
+    if (!organize_indices.is_empty()) {
+        state.priority_step = Some(Box::new(PriorityStep::new(organize_entries, organize_indices, organize_resume)));
     }
 }
 
@@ -3261,6 +3266,15 @@ fn poll_priority_step(state: &mut AppState) {
 /// advance to the next torrent in the priority step, or close it when done.
 fn advance_priority_step(state: &mut AppState) {
     let Some(step) = state.priority_step.as_mut() else { return; };
+    // honor the originally-requested start option for the entry being left
+    if let (Some(&torrent_index), Some(&should_resume)) =
+        (step.indices.get(step.current), step.resume_on_finish.get(step.current))
+    {
+        if (should_resume) {
+            // ponytail: plain Resume for now, a later task swaps this for FinalizeAdd
+            let _ = client::send(Request::Resume { index: torrent_index });
+        }
+    }
     if (step.current + 1 < step.indices.len()) {
         step.current += 1;
         let mut files_state = TableState::default();
