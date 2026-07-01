@@ -131,6 +131,9 @@ impl TextField {
         let after = self.buffer[byte_cursor..].to_string();
         let completed = complete_filesystem_path(&before);
         if (completed == before) { return; }
+        // never let a completion shrink what the user typed (multi-char
+        // lowercase expansions can make the lcp shorter than the input)
+        if (completed.chars().count() < before.chars().count()) { return; }
         self.cursor = completed.chars().count();
         self.buffer = completed;
         self.buffer.push_str(&after);
@@ -362,6 +365,9 @@ mod tests {
         field.tab_complete();
         assert!(field.buffer().starts_with(&format!("{}/downloads/", temp_dir.display())));
         assert!(field.buffer().ends_with(" TAIL"));
+        // cursor must sit at the end of the completed prefix, before the tail
+        let completed_prefix_len = format!("{}/downloads/", temp_dir.display()).chars().count();
+        assert_eq!(field.cursor(), completed_prefix_len);
         std::fs::remove_dir_all(&temp_dir).ok();
     }
 
