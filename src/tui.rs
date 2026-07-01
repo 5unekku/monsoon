@@ -982,6 +982,7 @@ struct RenameConfirm {
 enum RenameConfirmKind {
     Folder { index: usize, old_prefix: String, new_prefix: String },
     Move { index: usize, new_save_path: String },
+    RevertToDefaultLayout { index: usize },
 }
 
 /// a single row in the sidebar flat list. headers are visual separators;
@@ -1004,6 +1005,11 @@ struct ConfirmDelete {
     torrent_name: String,
     /// whether to also remove downloaded files from disk
     delete_files: bool,
+}
+
+struct ConfirmRevertLayout {
+    torrent_index: usize,
+    torrent_name: String,
 }
 
 /// per-torrent add-time options collected by the options form before
@@ -1199,6 +1205,8 @@ struct AppState {
     show_help: bool,
     /// when Some, a delete confirmation dialog is open
     confirm_delete: Option<ConfirmDelete>,
+    /// when Some, a revert-to-default-layout confirmation dialog is open
+    confirm_revert_layout: Option<ConfirmRevertLayout>,
     /// folder paths that are currently collapsed in the content tab
     collapsed_folders: std::collections::BTreeSet<String>,
     /// terminal capabilities probed at startup. truecolor is recorded but
@@ -1296,6 +1304,7 @@ impl AppState {
             column_picker: None,
             show_help: false,
             confirm_delete: None,
+            confirm_revert_layout: None,
             collapsed_folders: std::collections::BTreeSet::new(),
             truecolor,
             nerd_font,
@@ -1535,6 +1544,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                         }
                     } else if (state.confirm_delete.is_some()) {
                         handle_delete_confirm_key(key.code, key.modifiers, &mut state)
+                    } else if (state.confirm_revert_layout.is_some()) {
+                        handle_revert_layout_confirm_key(key.code, &mut state);
+                        false
                     } else if (state.column_picker.is_some()) {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_options.is_some()) {
@@ -1638,7 +1650,15 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Char('m'), KeyModifiers::NONE) => open_move_prompt(state),
         (KeyCode::Char('n'), KeyModifiers::NONE)
         | (KeyCode::Char('n'), KeyModifiers::CONTROL) => open_add_prompt(state),
-        (KeyCode::Char('R'), KeyModifiers::SHIFT) => force_recheck(state),
+        (KeyCode::Char('R'), KeyModifiers::SHIFT) => {
+            // content tab: revert to the layout snapshotted at add time.
+            // elsewhere shift+r keeps its force-recheck meaning.
+            if (state.focus == Pane::Detail && state.detail_tab == DetailTab::Content) {
+                open_revert_layout_confirm(state);
+            } else {
+                force_recheck(state);
+            }
+        }
         // 'a' is reserved for future wasd-left (tree collapse). use T = "tracker"
         (KeyCode::Char('T'), KeyModifiers::SHIFT) => reannounce(state),
         (KeyCode::Char('g'), KeyModifiers::NONE) => show_magnet(state),
@@ -2121,6 +2141,116 @@ fn draw_delete_confirm(frame: &mut ratatui::Frame, state: &AppState) {
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
             "tab toggle files   y/enter confirm   n/esc cancel",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[4],
+    );
+}
+
+fn open_revert_layout_confirm(state: &mut AppState) {
+    let Some(index) = state.selected_torrent_index() else {
+        state.error = Some("no torrent selected".to_string());
+        return;
+    };
+    let name = state.torrents.get(index).map(|torrent| torrent.name.clone()).unwrap_or_default();
+    state.confirm_revert_layout = Some(ConfirmRevertLayout { torrent_index: index, torrent_name: name });
+}
+
+/// y/enter dispatches the revert; any other key cancels. a
+/// RenameConfirmation response routes into the shared rename_confirm
+/// overlay, whose resend path carries the RevertToDefaultLayout kind.
+fn handle_revert_layout_confirm_key(code: KeyCode, state: &mut AppState) {
+    let Some(confirm) = state.confirm_revert_layout.take() else { return; };
+    match code {
+        KeyCode::Char('y') | KeyCode::Enter => {
+            match client::send(Request::RevertToDefaultLayout { index: confirm.torrent_index, decisions: None }) {
+                Ok(Response::Ok) => {
+                    state.error = Some(format!("reverted \"{}\" to its default layout", confirm.torrent_name));
+                    state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+                }
+                Ok(Response::RenameResult { renamed, rejected }) if rejected.is_empty() => {
+                    state.error = Some(format!("reverted {} file(s)", renamed.len()));
+                    state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
+                }
+                Ok(Response::RenameResult { rejected, .. }) => {
+                    state.error = rejected.first().map(|(_, reason)| format!("revert rejected: {}", reason));
+                }
+                Ok(Response::RenameConfirmation { concerns }) => {
+                    state.rename_confirm = Some(RenameConfirm {
+                        kind: RenameConfirmKind::RevertToDefaultLayout { index: confirm.torrent_index },
+                        concerns: concerns.into_iter().collect(),
+                        decisions: crate::ipc::RenameDecisions {
+                            merge_same: true,
+                            merge_unrelated: true,
+                            untracked: crate::ipc::UntrackedChoice::Leave,
+                        },
+                    });
+                }
+                Ok(Response::Err(message)) => state.error = Some(format!("revert: {}", message)),
+                Ok(_) => state.error = Some("unexpected response to revert".to_string()),
+                Err(error) => state.error = Some(format!("revert: {}", error)),
+            }
+        }
+        _ => {}
+    }
+}
+
+fn draw_revert_layout_confirm(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(confirm) = &state.confirm_revert_layout else { return; };
+    let area = frame.area();
+    let width = 54u16.min(area.width.saturating_sub(4));
+    let height = 8u16;
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Red))
+        .title(" revert to layout as of adding ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ])
+    .split(inner);
+
+    let name = if (confirm.torrent_name.len() > inner.width as usize - 2) {
+        format!("{}…", &confirm.torrent_name[..inner.width as usize - 3])
+    } else {
+        confirm.torrent_name.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(name, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))),
+        layout[0],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "undoes every rename made since this torrent",
+            Style::default().fg(Color::White),
+        ))),
+        layout[2],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "was added, including manual reorganization",
+            Style::default().fg(Color::White),
+        ))),
+        layout[3],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            "y/enter confirm   any other key cancels",
             Style::default().fg(Color::DarkGray),
         ))),
         layout[4],
@@ -3270,10 +3400,9 @@ fn advance_priority_step(state: &mut AppState) {
     if let (Some(&torrent_index), Some(&should_resume)) =
         (step.indices.get(step.current), step.resume_on_finish.get(step.current))
     {
-        if (should_resume) {
-            // ponytail: plain Resume for now, a later task swaps this for FinalizeAdd
-            let _ = client::send(Request::Resume { index: torrent_index });
-        }
+        // one round trip: snapshot the default layout server-side and
+        // resume (or not) per the originally-requested start option
+        let _ = client::send(Request::FinalizeAdd { index: torrent_index, resume: should_resume });
     }
     if (step.current + 1 < step.indices.len()) {
         step.current += 1;
@@ -3485,6 +3614,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     }
     if (state.confirm_delete.is_some()) {
         draw_delete_confirm(frame, state);
+    }
+    if (state.confirm_revert_layout.is_some()) {
+        draw_revert_layout_confirm(frame, state);
     }
     if (state.show_help) {
         draw_help_overlay(frame);
@@ -4098,6 +4230,8 @@ fn resend_rename_confirm(state: &mut AppState) {
             client::send(Request::RenameFolder { index, old_prefix, new_prefix, decisions }),
         RenameConfirmKind::Move { index, new_save_path } =>
             client::send(Request::Move { index, new_save_path, decisions }),
+        RenameConfirmKind::RevertToDefaultLayout { index } =>
+            client::send(Request::RevertToDefaultLayout { index, decisions }),
     };
     match response {
         Ok(Response::RenameResult { renamed, rejected }) if rejected.is_empty() =>
