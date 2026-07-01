@@ -1751,7 +1751,7 @@ fn open_move_prompt(state: &mut AppState) {
         .map(|torrent| torrent.save_path.clone()).unwrap_or_default();
     state.prompt = Some(Prompt {
         title: format!("move torrent #{} — new save directory", index),
-        helper: "absolute path. files will be moved on disk by libtorrent.".to_string(),
+        helper: "absolute path. files will be moved on disk by libtorrent. ctrl+r: recent paths.".to_string(),
         lines: vec![TextField::with_completion(current, CompletionSource::Filesystem)],
         cursor_line: 0,
         action: PromptAction::Move,
@@ -3728,6 +3728,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.add_options.is_some()) {
         draw_add_options_form(frame, state);
     }
+    if (state.recent_paths_picker.is_some()) {
+        draw_recent_paths_picker(frame, state);
+    }
 }
 
 fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
@@ -3892,9 +3895,14 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
         ])),
         layout[0],
     );
+    let helper = if (form.edit_buffer.is_some()) {
+        " tab complete · ctrl+r recent · enter confirm · esc cancel"
+    } else {
+        " w/s/tab move · enter confirm · esc cancel"
+    };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            " w/s/tab move · enter confirm · esc cancel",
+            helper,
             Style::default().fg(Color::DarkGray),
         ))),
         layout[1],
@@ -4193,6 +4201,51 @@ fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
         Paragraph::new(hint).style(Style::default().fg(Color::Gray)),
         layout[3],
     );
+}
+
+/// centered modal listing config.recent_save_paths, most recent on top.
+/// clones draw_interface_picker's geometry; rendered last in draw() so it
+/// sits on top of the add-options form and the move prompt.
+fn draw_recent_paths_picker(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(picker) = state.recent_paths_picker.as_ref() else { return; };
+    let area = frame.area();
+    let width = 60u16.min(area.width.saturating_sub(4));
+    let height = ((picker.items.len() as u16) + 3).min(area.height.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" recent save paths ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+    ]).split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            " w/s move  enter pick  esc cancel",
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[0],
+    );
+
+    let lines: Vec<Line> = picker.items.iter().enumerate().map(|(index, path)| {
+        let style = if (index == picker.selected) {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        Line::from(Span::styled(format!(" {} ", path), style))
+    }).collect();
+    frame.render_widget(Paragraph::new(lines), layout[1]);
 }
 
 fn draw_rename_confirm(frame: &mut ratatui::Frame, state: &AppState) {
