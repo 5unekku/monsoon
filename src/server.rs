@@ -1553,6 +1553,10 @@ fn parse_bool(value: &str) -> bool {
     matches!(value, "true" | "1" | "yes")
 }
 
+/// (file index, new path) pairs for accepted renames, or (file index, reason)
+/// for rejected ones
+type RenameEntries = Vec<(usize, String)>;
+
 /// filter a rename plan against paths that aren't part of the batch. exact
 /// file-on-file collisions and duplicate targets are moved to `rejected`;
 /// any rejection means the caller must abort the whole batch.
@@ -1560,7 +1564,7 @@ fn filter_rename_plan(
     static_files: &[&str],
     plan: Vec<(usize, String)>,
     mut rejected: Vec<(usize, String)>,
-) -> (Vec<(usize, String)>, Vec<(usize, String)>) {
+) -> (RenameEntries, RenameEntries) {
     // check both intra-batch and against-the-rest collisions. merging is
     // allowed: coexisting files in the same destination folder are fine;
     // only file-vs-file exact path collisions are rejected.

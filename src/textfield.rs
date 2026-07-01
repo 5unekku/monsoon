@@ -37,7 +37,6 @@ impl TextField {
     pub fn buffer(&self) -> &str { &self.buffer }
     pub fn cursor(&self) -> usize { self.cursor }
     pub fn completion_source(&self) -> CompletionSource { self.completion.clone() }
-    pub fn set_completion(&mut self, completion: CompletionSource) { self.completion = completion; }
 
     fn char_len(&self) -> usize { self.buffer.chars().count() }
 
