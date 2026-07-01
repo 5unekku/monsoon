@@ -101,6 +101,45 @@ pub fn compute_content_layout_renames(
     renames
 }
 
+/// compute the rename plan needed to restore `current` paths back to
+/// `default_layout`, indexed by file_index (both vecs are parallel to the
+/// torrent's file list). only files whose current path differs from the
+/// stored default appear in the plan.
+pub fn compute_revert_plan(current: &[String], default_layout: &[String]) -> Vec<(usize, String)> {
+    current.iter().enumerate()
+        .filter_map(|(file_index, current_path)| {
+            let target = default_layout.get(file_index)?;
+            if (target == current_path) { None } else { Some((file_index, target.clone())) }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod revert_plan_tests {
+    use super::*;
+
+    #[test]
+    fn only_changed_files_appear_in_the_plan() {
+        let current = vec!["Show/a.mkv".to_string(), "Show/b.mkv".to_string()];
+        let default_layout = vec!["Show/a.mkv".to_string(), "Show/Renamed/b.mkv".to_string()];
+        let plan = compute_revert_plan(&current, &default_layout);
+        assert_eq!(plan, vec![(1, "Show/Renamed/b.mkv".to_string())]);
+    }
+
+    #[test]
+    fn no_changes_yields_empty_plan() {
+        let current = vec!["a.mkv".to_string()];
+        assert!(compute_revert_plan(&current, &current).is_empty());
+    }
+
+    #[test]
+    fn mismatched_lengths_only_diff_the_overlapping_indices() {
+        let current = vec!["a.mkv".to_string(), "b.mkv".to_string()];
+        let default_layout = vec!["a.mkv".to_string()];
+        assert!(compute_revert_plan(&current, &default_layout).is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
