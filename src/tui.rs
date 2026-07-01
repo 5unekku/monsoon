@@ -1038,7 +1038,7 @@ struct AddOptionsForm {
     /// `draw_add_options_form`)
     field: usize,
     /// when Some, the save_path field is in inline-edit mode
-    edit_buffer: Option<String>,
+    edit_buffer: Option<TextField>,
 }
 
 enum PriorityRenameTarget {
@@ -2211,24 +2211,44 @@ fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut Ap
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Esc, _) => form.edit_buffer = None,
             (KeyCode::Enter, _) => {
-                let buffer = form.edit_buffer.take().unwrap_or_default();
+                let buffer = form.edit_buffer.take().map(|field| field.buffer().to_string()).unwrap_or_default();
                 if let Some(options) = form.options.get_mut(form.current) {
                     options.save_path = buffer;
                 }
             }
+            (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Left, KeyModifiers::ALT) => {
+                if let Some(field) = form.edit_buffer.as_mut() { field.move_word_left(); }
+            }
+            (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::ALT) => {
+                if let Some(field) = form.edit_buffer.as_mut() { field.move_word_right(); }
+            }
+            (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
+                if let Some(field) = form.edit_buffer.as_mut() { field.delete_word_backward(); }
+            }
+            (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Delete, KeyModifiers::ALT) => {
+                if let Some(field) = form.edit_buffer.as_mut() { field.delete_word_forward(); }
+            }
+            (KeyCode::Left, _) => { if let Some(field) = form.edit_buffer.as_mut() { field.move_left(); } }
+            (KeyCode::Right, _) => { if let Some(field) = form.edit_buffer.as_mut() { field.move_right(); } }
+            (KeyCode::Home, _) => { if let Some(field) = form.edit_buffer.as_mut() { field.move_home(); } }
+            (KeyCode::End, _) => { if let Some(field) = form.edit_buffer.as_mut() { field.move_end(); } }
+            (KeyCode::Delete, _) => { if let Some(field) = form.edit_buffer.as_mut() { field.delete_forward(); } }
             (KeyCode::Backspace, _) => {
-                if let Some(buffer) = form.edit_buffer.as_mut() { buffer.pop(); }
+                if let Some(field) = form.edit_buffer.as_mut() { field.backspace(); }
+            }
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                if let (Ok(mut clipboard), Some(field)) = (arboard::Clipboard::new(), form.edit_buffer.as_mut()) {
+                    if let Ok(text) = clipboard.get_text() { field.paste(&text); }
+                }
+            }
+            (KeyCode::Tab, _) => {
+                if let Some(field) = form.edit_buffer.as_mut() { field.tab_complete(); }
             }
             (KeyCode::Char(character), modifiers)
                 if !modifiers.contains(KeyModifiers::CONTROL)
                     && !modifiers.contains(KeyModifiers::ALT) =>
             {
-                if let Some(buffer) = form.edit_buffer.as_mut() { buffer.push(character); }
-            }
-            (KeyCode::Tab, _) => {
-                if let Some(buffer) = form.edit_buffer.as_mut() {
-                    *buffer = tab_complete_path(buffer);
-                }
+                if let Some(field) = form.edit_buffer.as_mut() { field.insert_char(character); }
             }
             _ => {}
         }
@@ -2272,7 +2292,7 @@ fn activate_add_options_field(state: &mut AppState) {
         1 => options.sequential = !options.sequential,
         2 => options.first_last = !options.first_last,
         3 => options.content_layout = options.content_layout.cycle(),
-        4 => form.edit_buffer = Some(options.save_path.clone()),
+        4 => form.edit_buffer = Some(TextField::with_completion(options.save_path.clone(), CompletionSource::Filesystem)),
         _ => {}
     }
 }
@@ -3381,14 +3401,6 @@ fn tab_complete_content_filter(state: &mut AppState) {
     }
 }
 
-// temporary shim until the add-options form holds TextField directly (task 8):
-// route old whole-buffer completion through the shared textfield impl.
-fn tab_complete_path(buffer: &str) -> String {
-    let mut field = TextField::with_completion(buffer, CompletionSource::Filesystem);
-    field.tab_complete();
-    field.buffer().to_string()
-}
-
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.priority_step.is_some()) {
         draw_priority_step(frame, state);
@@ -3602,22 +3614,13 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
     );
 
     let options = form.options.get(form.current).cloned().unwrap_or_default();
-    let editing_path = form.edit_buffer.is_some();
-    let path_display = if (editing_path) {
-        format!("[ {}_ ]", form.edit_buffer.as_deref().unwrap_or(""))
-    } else if (options.save_path.is_empty()) {
-        "(default — daemon's default_save_path)".to_string()
-    } else {
-        options.save_path.clone()
-    };
-
     let button_label = if (form.current + 1 < form.entries.len()) { "[ next → ]" } else { "[ add ]" };
     let rows: Vec<(&str, String)> = vec![
         ("start",          format_bool(options.start)),
         ("sequential",     format_bool(options.sequential)),
         ("first/last",     format_bool(options.first_last).to_string()),
         ("create subfolder", options.content_layout.label().to_string()),
-        ("download path",  path_display),
+        ("download path",  String::new()), // row 4 is rendered specially below; this value is unused
         ("",               button_label.to_string()),
     ];
     let lines: Vec<Line> = rows.iter().enumerate().map(|(index, (label, value))| {
@@ -3628,9 +3631,7 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
         } else {
             Style::default()
         };
-        let value_style = if (is_focused && editing_path && index == 4) {
-            Style::default().fg(Color::Black).bg(Color::Yellow)
-        } else if (index == 5 && is_focused) {
+        let value_style = if (index == 5 && is_focused) {
             Style::default().fg(Color::Green)
         } else if (is_focused) {
             Style::default().fg(Color::Cyan)
@@ -3639,12 +3640,28 @@ fn draw_add_options_form(frame: &mut ratatui::Frame, state: &AppState) {
         } else {
             Style::default().fg(Color::Gray)
         };
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled(marker, Style::default().fg(Color::Cyan)),
             Span::styled(format!("{:18}", label), label_style),
             Span::raw("  "),
-            Span::styled(value.clone(), value_style),
-        ])
+        ];
+        if (index == 4) {
+            if let Some(field) = &form.edit_buffer {
+                spans.push(Span::raw("[ "));
+                spans.extend(render_field_with_cursor(field));
+                spans.push(Span::raw(" ]"));
+            } else {
+                let display = if (options.save_path.is_empty()) {
+                    "(default — daemon's default_save_path)".to_string()
+                } else {
+                    options.save_path.clone()
+                };
+                spans.push(Span::styled(display, value_style));
+            }
+        } else {
+            spans.push(Span::styled(value.clone(), value_style));
+        }
+        Line::from(spans)
     }).collect();
     frame.render_widget(Paragraph::new(lines), layout[3]);
 
