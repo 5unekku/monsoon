@@ -906,7 +906,7 @@ impl FeedsState {
 /// the `purpose` field is what `commit` reads after `enter` is pressed.
 struct TextInput {
     purpose: InputPurpose,
-    buffer: String,
+    field: TextField,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1673,13 +1673,13 @@ fn open_search(state: &mut AppState) {
         Pane::Detail if state.detail_tab == DetailTab::Content => {
             state.active_input = Some(TextInput {
                 purpose: InputPurpose::ContentFilter,
-                buffer: state.content_filter.clone(),
+                field: TextField::new(state.content_filter.clone()),
             });
         }
         _ => {
             state.active_input = Some(TextInput {
                 purpose: InputPurpose::ListFilter,
-                buffer: state.name_filter.clone(),
+                field: TextField::new(state.name_filter.clone()),
             });
         }
     }
@@ -2591,70 +2591,68 @@ fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut A
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
         (KeyCode::Tab, _) => {
-            let purpose = state.active_input.as_ref().map(|i| i.purpose);
-            if purpose == Some(InputPurpose::ContentFilter) {
+            let purpose = state.active_input.as_ref().map(|input| input.purpose);
+            if (purpose == Some(InputPurpose::ContentFilter)) {
                 tab_complete_content_filter(state);
             }
         }
-        (KeyCode::Esc, _) => {
-            // cancel: revert filter to its previous committed value
-            if let Some(input) = state.active_input.take() {
-                if (input.purpose == InputPurpose::ListFilter) {
-                    // nothing to revert — name_filter was being mirrored live
-                    // and the user can simply press / again to edit it
-                }
-            }
+        (KeyCode::Esc, _) => { state.active_input = None; }
+        (KeyCode::Enter, _) => { state.active_input = None; }
+        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Left, KeyModifiers::ALT) => {
+            if let Some(input) = state.active_input.as_mut() { input.field.move_word_left(); }
         }
-        (KeyCode::Enter, _) => {
-            // commit closes the input bar; the live buffer was already applied
-            state.active_input = None;
+        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::ALT) => {
+            if let Some(input) = state.active_input.as_mut() { input.field.move_word_right(); }
+        }
+        (KeyCode::Left, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_left(); } }
+        (KeyCode::Right, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_right(); } }
+        (KeyCode::Home, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_home(); } }
+        (KeyCode::End, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_end(); } }
+        (KeyCode::Delete, _) => { if let Some(input) = state.active_input.as_mut() { input.field.delete_forward(); } }
+        (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
+            apply_active_input_edit(state, |field| field.delete_word_backward());
         }
         (KeyCode::Backspace, _) => {
-            if let Some(input) = state.active_input.as_mut() {
-                input.buffer.pop();
-                match input.purpose {
-                    InputPurpose::ListFilter => {
-                        state.name_filter = input.buffer.clone();
-                        let visible = state.filtered_indices().len();
-                        if let Some(selected) = state.table_state.selected() {
-                            if (visible == 0) {
-                                state.table_state.select(None);
-                            } else if (selected >= visible) {
-                                state.table_state.select(Some(visible - 1));
-                            }
-                        }
-                    }
-                    InputPurpose::ContentFilter => {
-                        state.content_filter = input.buffer.clone();
-                        state.content_filter_lc = state.content_filter.to_lowercase();
-                        rebuild_content_matches(state);
-                        state.detail_files_state.select(Some(0));
-                    }
-                }
-            }
+            apply_active_input_edit(state, |field| field.backspace());
         }
         (KeyCode::Char(character), modifiers)
             if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
         {
-            if let Some(input) = state.active_input.as_mut() {
-                input.buffer.push(character);
-                match input.purpose {
-                    InputPurpose::ListFilter => {
-                        state.name_filter = input.buffer.clone();
-                    }
-                    InputPurpose::ContentFilter => {
-                        state.content_filter = input.buffer.clone();
-                        state.content_filter_lc = state.content_filter.to_lowercase();
-                        rebuild_content_matches(state);
-                        state.detail_files_state.select(Some(0));
-                    }
-                }
-            }
+            apply_active_input_edit(state, move |field| field.insert_char(character));
         }
         _ => {}
     }
     false
+}
+
+/// mutate the active input's TextField, then propagate the new buffer into
+/// whichever live filter it drives. both edit operations (typed char,
+/// backspace, word-delete) need this same propagate-after-mutate step, so it
+/// lives in one place instead of being copy-pasted per key.
+fn apply_active_input_edit(state: &mut AppState, mutate: impl FnOnce(&mut TextField)) {
+    let Some(input) = state.active_input.as_mut() else { return; };
+    mutate(&mut input.field);
+    let buffer = input.field.buffer().to_string();
+    match input.purpose {
+        InputPurpose::ListFilter => {
+            state.name_filter = buffer;
+            let visible = state.filtered_indices().len();
+            if let Some(selected) = state.table_state.selected() {
+                if (visible == 0) {
+                    state.table_state.select(None);
+                } else if (selected >= visible) {
+                    state.table_state.select(Some(visible - 1));
+                }
+            }
+        }
+        InputPurpose::ContentFilter => {
+            state.content_filter = buffer;
+            state.content_filter_lc = state.content_filter.to_lowercase();
+            rebuild_content_matches(state);
+            state.detail_files_state.select(Some(0));
+        }
+    }
 }
 
 fn handle_picker_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
@@ -3394,7 +3392,7 @@ fn tab_complete_content_filter(state: &mut AppState) {
         state.content_filter = prefix;
         state.content_filter_lc = state.content_filter.to_lowercase();
         if let Some(input) = state.active_input.as_mut() {
-            input.buffer = state.content_filter.clone();
+            input.field = TextField::new(state.content_filter.clone());
         }
         rebuild_content_matches(state);
         state.detail_files_state.select(Some(0));
@@ -4840,14 +4838,14 @@ fn draw_input_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
         InputPurpose::ListFilter => "/",
         InputPurpose::ContentFilter => "files",
     };
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(format!(" {} ", prefix), Style::default().fg(Color::Black).bg(Color::Yellow)),
         Span::raw(" "),
-        Span::raw(input.buffer.as_str()),
-        Span::styled("█", Style::default().fg(Color::Yellow)),
-        Span::raw("   "),
-        Span::styled("esc cancel / enter close", Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+    spans.extend(render_field_with_cursor(&input.field));
+    spans.push(Span::raw("   "));
+    spans.push(Span::styled("esc cancel / enter close", Style::default().fg(Color::DarkGray)));
+    let line = Line::from(spans);
     frame.render_widget(Paragraph::new(line), area);
 }
 
