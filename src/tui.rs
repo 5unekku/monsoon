@@ -1644,23 +1644,14 @@ fn handle_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> b
         (KeyCode::Delete, _) | (KeyCode::Char('x'), KeyModifiers::NONE) | (KeyCode::Char('X'), KeyModifiers::SHIFT) => open_delete_confirm(state),
         (KeyCode::Char('?'), _) => state.show_help = true,
         // file/folder priority — only when the content tab has focus. digits
-        // map to qbittorrent's priority levels; libtorrent's 0..=7 is folded
-        // into the five buckets the user actually cares about. on folder rows
-        // every descendant file is updated atomically.
+        // map 1:1 onto libtorrent's 0..=7 range, no bucket folding. on folder
+        // rows every descendant file is updated atomically.
         (KeyCode::Char(character), KeyModifiers::NONE)
             if (state.focus == Pane::Detail
                 && state.detail_tab == DetailTab::Content
-                && matches!(character, '0' | '1' | '2' | '3' | '4')) =>
+                && priority_key_to_value(character).is_some()) =>
         {
-            let priority = match character {
-                '0' => 0u8,
-                '1' => 1u8,
-                '2' => 4u8,
-                '3' => 6u8,
-                '4' => 7u8,
-                _ => unreachable!(),
-            };
-            set_focused_priority(state, priority);
+            set_focused_priority(state, priority_key_to_value(character).unwrap());
         }
         // open the context-appropriate search bar. routes to torrent filter
         // (list pane), file filter (content tab), or no-op (sidebar).
@@ -2473,6 +2464,32 @@ fn set_focused_priority(state: &mut AppState, priority: u8) {
     state.last_detail_poll = Instant::now() - DETAIL_POLL_INTERVAL;
 }
 
+/// libtorrent's file priority is 0..=7 (0 = don't download, 4 = default,
+/// 7 = maximum) — see `lt::download_priority_t` in `src/bridge.cpp`. keys 0-7
+/// map 1:1 onto that range; there is no 8th or 9th level to bind further keys to.
+fn priority_key_to_value(character: char) -> Option<u8> {
+    character.to_digit(10).filter(|&digit| digit <= 7).map(|digit| digit as u8)
+}
+
+#[cfg(test)]
+mod priority_key_tests {
+    use super::priority_key_to_value;
+
+    #[test]
+    fn maps_zero_through_seven_one_to_one() {
+        for digit in 0..=7u8 {
+            let character = char::from_digit(digit as u32, 10).unwrap();
+            assert_eq!(priority_key_to_value(character), Some(digit));
+        }
+    }
+
+    #[test]
+    fn eight_and_nine_are_not_mapped() {
+        assert_eq!(priority_key_to_value('8'), None);
+        assert_eq!(priority_key_to_value('9'), None);
+    }
+}
+
 fn collapse_focused(state: &mut AppState, collapse: bool) {
     if (state.focus != Pane::Detail || state.detail_tab != DetailTab::Content) {
         return;
@@ -3176,14 +3193,8 @@ fn handle_priority_step_key(code: KeyCode, modifiers: KeyModifiers, state: &mut 
             }
         }
         (KeyCode::Char('/'), KeyModifiers::NONE) => step.filter_active = true,
-        (KeyCode::Char(character), KeyModifiers::NONE)
-            if matches!(character, '0' | '1' | '2' | '3' | '4') =>
-        {
-            let priority = match character {
-                '0' => 0u8, '1' => 1u8, '2' => 4u8, '3' => 6u8, '4' => 7u8,
-                _ => unreachable!(),
-            };
-            set_step_priority(step, priority);
+        (KeyCode::Char(character), KeyModifiers::NONE) if priority_key_to_value(character).is_some() => {
+            set_step_priority(step, priority_key_to_value(character).unwrap());
         }
         _ => {}
     }
@@ -3483,11 +3494,7 @@ fn draw_priority_step(frame: &mut ratatui::Frame, state: &mut AppState) {
 
     // hint bar
     let hint = Line::from(vec![
-        Span::styled(" 0 ", Style::default().fg(Color::Yellow)), Span::raw("skip  "),
-        Span::styled("1 ", Style::default().fg(Color::Yellow)), Span::raw("low  "),
-        Span::styled("2 ", Style::default().fg(Color::Yellow)), Span::raw("normal  "),
-        Span::styled("3 ", Style::default().fg(Color::Yellow)), Span::raw("high  "),
-        Span::styled("4 ", Style::default().fg(Color::Yellow)), Span::raw("max  "),
+        Span::styled(" 0-7 ", Style::default().fg(Color::Yellow)), Span::raw("priority (0 skip, 4 normal, 7 max)  "),
         Span::styled("r ", Style::default().fg(Color::Yellow)), Span::raw("rename  "),
         Span::styled("t ", Style::default().fg(Color::Yellow)), Span::raw("rename torrent  "),
         Span::styled("enter/esc ", Style::default().fg(Color::Yellow)),
@@ -3614,7 +3621,7 @@ fn draw_help_overlay(frame: &mut ratatui::Frame) {
         ("L", "set per-torrent rate limits"),
         ("g", "copy magnet link"),
         ("S", "toggle sequential download"),
-        ("0-4", "set file priority (content tab)"),
+        ("0-7", "set file priority (content tab; 0 skip, 4 normal, 7 max)"),
         ("/", "filter torrents by name"),
         ("[  ]", "cycle detail tabs"),
         ("q", "toggle sidebar"),
@@ -4820,7 +4827,7 @@ fn draw_hint_bar(frame: &mut ratatui::Frame, area: Rect, state: &AppState) {
         Span::raw("rate limit  "),
         Span::styled("q/e ", Style::default().fg(Color::Yellow)),
         Span::raw("sidebar/detail  "),
-        Span::styled("0-4 ", Style::default().fg(Color::Yellow)),
+        Span::styled("0-7 ", Style::default().fg(Color::Yellow)),
         Span::raw("file prio  "),
         Span::styled("/ ", Style::default().fg(Color::Yellow)),
         Span::raw("filter  "),
