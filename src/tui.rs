@@ -2608,7 +2608,9 @@ fn handle_active_input_key(code: KeyCode, modifiers: KeyModifiers, state: &mut A
         (KeyCode::Right, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_right(); } }
         (KeyCode::Home, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_home(); } }
         (KeyCode::End, _) => { if let Some(input) = state.active_input.as_mut() { input.field.move_end(); } }
-        (KeyCode::Delete, _) => { if let Some(input) = state.active_input.as_mut() { input.field.delete_forward(); } }
+        (KeyCode::Delete, _) => {
+            apply_active_input_edit(state, |field| field.delete_forward());
+        }
         (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
             apply_active_input_edit(state, |field| field.delete_word_backward());
         }
