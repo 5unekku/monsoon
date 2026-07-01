@@ -713,7 +713,7 @@ struct SettingsState {
     /// true when the user is editing a watch dir entry inline
     watch_dir_editing: bool,
     /// text buffer while watch_dir_editing is true
-    watch_dir_buffer: String,
+    watch_dir_buffer: TextField,
 }
 
 /// list of options shown by the network-interface dropdown. each entry's
@@ -770,7 +770,7 @@ impl SettingsState {
             watch_dir_list,
             watch_dir_selected: 0,
             watch_dir_editing: false,
-            watch_dir_buffer: String::new(),
+            watch_dir_buffer: TextField::new(String::new()),
         })
     }
 
@@ -4924,12 +4924,12 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
             (KeyCode::Esc, _) => {
                 settings.watch_dir_editing = false;
-                settings.watch_dir_buffer.clear();
+                settings.watch_dir_buffer = TextField::new(String::new());
             }
             (KeyCode::Enter, _) => {
-                let value = settings.watch_dir_buffer.trim().to_string();
+                let value = settings.watch_dir_buffer.buffer().trim().to_string();
                 settings.watch_dir_editing = false;
-                settings.watch_dir_buffer.clear();
+                settings.watch_dir_buffer = TextField::new(String::new());
                 if (!value.is_empty()) {
                     let index = settings.watch_dir_selected;
                     if (index < settings.watch_dir_list.len()) {
@@ -4941,12 +4941,35 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
                     submit_watch_dirs(settings);
                 }
             }
-            (KeyCode::Backspace, _) => { settings.watch_dir_buffer.pop(); }
+            (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Left, KeyModifiers::ALT) => {
+                settings.watch_dir_buffer.move_word_left();
+            }
+            (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::ALT) => {
+                settings.watch_dir_buffer.move_word_right();
+            }
+            (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
+                settings.watch_dir_buffer.delete_word_backward();
+            }
+            (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Delete, KeyModifiers::ALT) => {
+                settings.watch_dir_buffer.delete_word_forward();
+            }
+            (KeyCode::Left, _) => settings.watch_dir_buffer.move_left(),
+            (KeyCode::Right, _) => settings.watch_dir_buffer.move_right(),
+            (KeyCode::Home, _) => settings.watch_dir_buffer.move_home(),
+            (KeyCode::End, _) => settings.watch_dir_buffer.move_end(),
+            (KeyCode::Delete, _) => settings.watch_dir_buffer.delete_forward(),
+            (KeyCode::Backspace, _) => settings.watch_dir_buffer.backspace(),
+            (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+                if let Ok(mut clipboard) = arboard::Clipboard::new() {
+                    if let Ok(text) = clipboard.get_text() { settings.watch_dir_buffer.paste(&text); }
+                }
+            }
+            (KeyCode::Tab, _) => settings.watch_dir_buffer.tab_complete(),
             (KeyCode::Char(character), modifiers)
                 if !modifiers.contains(KeyModifiers::CONTROL)
                     && !modifiers.contains(KeyModifiers::ALT) =>
             {
-                settings.watch_dir_buffer.push(character);
+                settings.watch_dir_buffer.insert_char(character);
             }
             _ => {}
         }
@@ -4985,7 +5008,8 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
             (KeyCode::Char('a'), KeyModifiers::NONE) => {
                 settings.watch_dir_selected = settings.watch_dir_list.len();
                 settings.watch_dir_editing = true;
-                settings.watch_dir_buffer.clear();
+                settings.watch_dir_buffer =
+                    TextField::with_completion(String::new(), CompletionSource::Filesystem);
             }
             // delete selected entry
             (KeyCode::Char('d'), KeyModifiers::NONE) | (KeyCode::Delete, _) => {
@@ -5002,7 +5026,8 @@ fn handle_settings_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppSt
             (KeyCode::Enter, _) | (KeyCode::Char('i'), KeyModifiers::NONE) => {
                 let index = settings.watch_dir_selected;
                 let initial = settings.watch_dir_list.get(index).cloned().unwrap_or_default();
-                settings.watch_dir_buffer = initial;
+                settings.watch_dir_buffer =
+                    TextField::with_completion(initial, CompletionSource::Filesystem);
                 settings.watch_dir_editing = true;
             }
             // move field selection up to leave the list
@@ -5363,36 +5388,36 @@ fn draw_settings_body(frame: &mut ratatui::Frame, area: Rect, settings: &mut Set
             if (is_selected) {
                 for (entry_index, entry) in settings.watch_dir_list.iter().enumerate() {
                     let row_is_selected = entry_index == settings.watch_dir_selected;
-                    let (entry_text, entry_style) = if (settings.watch_dir_editing && row_is_selected) {
-                        (
-                            format!("[ {}_ ]", settings.watch_dir_buffer),
-                            Style::default().fg(Color::Black).bg(Color::Yellow),
-                        )
+                    let line = if (settings.watch_dir_editing && row_is_selected) {
+                        let mut spans = vec![Span::raw("    "), Span::raw("[ ")];
+                        spans.extend(render_field_with_cursor(&settings.watch_dir_buffer));
+                        spans.push(Span::raw(" ]"));
+                        Line::from(spans)
                     } else if (row_is_selected) {
-                        (
-                            format!("▸ {}", entry),
-                            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
-                        )
+                        Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(
+                                format!("▸ {}", entry),
+                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                            ),
+                        ])
                     } else {
-                        (
-                            format!("  {}", entry),
-                            Style::default().fg(Color::Gray),
-                        )
+                        Line::from(vec![
+                            Span::raw("    "),
+                            Span::styled(
+                                format!("  {}", entry),
+                                Style::default().fg(Color::Gray),
+                            ),
+                        ])
                     };
-                    lines.push(Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled(entry_text, entry_style),
-                    ]));
+                    lines.push(line);
                 }
                 // show a blank editing row when appending a new entry
                 if (settings.watch_dir_editing && settings.watch_dir_selected >= settings.watch_dir_list.len()) {
-                    lines.push(Line::from(vec![
-                        Span::raw("    "),
-                        Span::styled(
-                            format!("[ {}_ ]", settings.watch_dir_buffer),
-                            Style::default().fg(Color::Black).bg(Color::Yellow),
-                        ),
-                    ]));
+                    let mut spans = vec![Span::raw("    "), Span::raw("[ ")];
+                    spans.extend(render_field_with_cursor(&settings.watch_dir_buffer));
+                    spans.push(Span::raw(" ]"));
+                    lines.push(Line::from(spans));
                 }
             }
         } else {
