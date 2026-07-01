@@ -201,6 +201,19 @@ impl App {
         }
     }
 
+    /// push a user-typed save path onto the mru list and persist. best-effort:
+    /// a failed config write logs a warning and never fails the add or move
+    /// that triggered it (the operation already succeeded).
+    fn record_recent_save_path(&mut self, path: &str) {
+        // limit 0 disables recording entirely
+        if (self.config.recent_paths_limit == 0) { return; }
+        let limit = self.config.recent_paths_limit;
+        crate::config::record_recent_path(&mut self.config.recent_save_paths, path, limit);
+        if let Err(error) = self.config.save() {
+            tracing::warn!("failed to persist recent save paths: {}", error);
+        }
+    }
+
     /// resolve save path + auto-tags for a new torrent based on an explicit
     /// override, an explicit category, or the default category-less behaviour.
     fn resolve_add_target(
@@ -395,6 +408,14 @@ impl App {
                     .map(|line| line.trim().to_string())
                     .filter(|line| !line.is_empty())
                     .collect();
+            }
+            "recent_paths_limit" => {
+                self.config.recent_paths_limit = value.parse()?;
+                // shrink immediately so the on-disk list never exceeds the cap
+                // (0 clears it); the save() at the end of this function
+                // persists both fields together
+                let limit = self.config.recent_paths_limit as usize;
+                self.config.recent_save_paths.truncate(limit);
             }
             "enable_dht" | "dht" => self.config.enable_dht = parse_bool(value),
             "enable_lsd" | "lsd" => self.config.enable_lsd = parse_bool(value),
@@ -687,6 +708,12 @@ impl App {
         // outcome arrives via storage_moved_alert; persist now so a daemon
         // restart before completion still points at the right location
         self.persist_torrent_list();
+        // record at the commit point only. the earlier returns never get here:
+        // the same-canonical-path skip is a no-op, the RenameConfirmation
+        // return is phase one of the two-phase flow (the decision re-send
+        // lands back here and records then), and a declined merge (the
+        // `(_, Some(_)) => return Ok(Response::Ok)` arm above) records nothing.
+        self.record_recent_save_path(trimmed);
         tracing::info!(index, new_save_path = trimmed, "submitted move_storage");
         Ok(Response::Ok)
     }
@@ -1201,18 +1228,23 @@ impl App {
             Request::Add { uri, save_path, category, start_paused, content_layout } => {
                 // delegate scheme + path resolution to the sources module so
                 // http/https/ftp/sftp urls and ~ expansion work uniformly.
-                match crate::sources::resolve(&uri) {
+                let result = match crate::sources::resolve(&uri) {
                     Ok(crate::sources::Source::Magnet(magnet)) => {
-                        match self.add_magnet(&magnet, save_path.as_deref(), category.as_deref(), start_paused, content_layout) {
-                            Ok(hash) => Response::Added { id: hash },
-                            Err(error) => Response::Err(error.to_string()),
-                        }
+                        self.add_magnet(&magnet, save_path.as_deref(), category.as_deref(), start_paused, content_layout)
                     }
                     Ok(crate::sources::Source::File(path)) => {
-                        match self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref(), start_paused, content_layout) {
-                            Ok(hash) => Response::Added { id: hash },
-                            Err(error) => Response::Err(error.to_string()),
+                        self.add_file(&path.to_string_lossy(), save_path.as_deref(), category.as_deref(), start_paused, content_layout)
+                    }
+                    Err(error) => Err(error),
+                };
+                match result {
+                    Ok(hash) => {
+                        // record only explicit user paths: category-resolved and
+                        // default-resolved adds arrive with save_path = None
+                        if let Some(path) = save_path.as_deref() {
+                            self.record_recent_save_path(path);
                         }
+                        Response::Added { id: hash }
                     }
                     Err(error) => Response::Err(error.to_string()),
                 }
