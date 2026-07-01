@@ -1012,6 +1012,17 @@ struct ConfirmRevertLayout {
     torrent_name: String,
 }
 
+/// recent-save-path dropdown opened with ctrl+r from the add-options
+/// save_path editor or the move prompt. items come from
+/// config.recent_save_paths, front of the list first (most recent on top).
+/// deliberately its own small struct rather than a reuse of
+/// InterfacePickerState, which is settings-bound and carries the magic
+/// __specific__ value.
+struct RecentPathPicker {
+    items: Vec<String>,
+    selected: usize,
+}
+
 /// per-torrent add-time options collected by the options form before
 /// dispatch. mirrors qbittorrent's add-torrent dialog.
 #[derive(Clone)]
@@ -1207,6 +1218,8 @@ struct AppState {
     confirm_delete: Option<ConfirmDelete>,
     /// when Some, a revert-to-default-layout confirmation dialog is open
     confirm_revert_layout: Option<ConfirmRevertLayout>,
+    /// when Some, the recent-save-paths dropdown is open
+    recent_paths_picker: Option<RecentPathPicker>,
     /// folder paths that are currently collapsed in the content tab
     collapsed_folders: std::collections::BTreeSet<String>,
     /// terminal capabilities probed at startup. truecolor is recorded but
@@ -1305,6 +1318,7 @@ impl AppState {
             show_help: false,
             confirm_delete: None,
             confirm_revert_layout: None,
+            recent_paths_picker: None,
             collapsed_folders: std::collections::BTreeSet::new(),
             truecolor,
             nerd_font,
@@ -1744,6 +1758,75 @@ fn open_move_prompt(state: &mut AppState) {
         torrent_index: index,
         allow_multiline: false,
     });
+}
+
+/// fetch the mru list fresh (one GetConfig round trip, so a second tui or a
+/// cli add is picked up with zero cache logic) and open the picker. reports
+/// via the status line when the list is empty or recording is disabled.
+fn open_recent_paths_picker(state: &mut AppState) {
+    match fetch_config() {
+        Ok(config) => {
+            if (config.recent_paths_limit == 0) {
+                state.error = Some("recent paths disabled (recent_paths_limit = 0)".to_string());
+            } else if (config.recent_save_paths.is_empty()) {
+                state.error = Some("no recent save paths".to_string());
+            } else {
+                state.recent_paths_picker = Some(RecentPathPicker {
+                    items: config.recent_save_paths,
+                    selected: 0,
+                });
+            }
+        }
+        Err(error) => state.error = Some(error.to_string()),
+    }
+}
+
+/// replace the active save-path field with the picked entry. the target is
+/// whichever surface hosted the ctrl+r: the add-options edit buffer when the
+/// form is up, the move prompt's single line otherwise. picking fills the
+/// buffer only; nothing is submitted and nothing is recorded until the
+/// eventual add/move succeeds daemon-side.
+fn apply_picked_recent_path(state: &mut AppState, picked: String) {
+    // with_completion places the cursor at the end, so the user can keep
+    // typing a subdirectory or tab-complete immediately
+    let field = TextField::with_completion(picked, CompletionSource::Filesystem);
+    if let Some(form) = state.add_options.as_mut() {
+        if (form.edit_buffer.is_some()) {
+            form.edit_buffer = Some(field);
+            return;
+        }
+    }
+    if let Some(prompt) = state.prompt.as_mut() {
+        if (matches!(prompt.action, PromptAction::Move)) {
+            if let Some(line) = prompt.lines.get_mut(0) { *line = field; }
+        }
+    }
+}
+
+/// keys for the recent-paths picker. mirrors handle_interface_picker_key:
+/// w/s/arrows navigate, home/end jump, esc/q closes, enter picks.
+/// returns true when the tui should exit (ctrl+c).
+fn handle_recent_paths_picker_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    let Some(picker) = state.recent_paths_picker.as_mut() else { return false; };
+    match code {
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Esc | KeyCode::Char('q') => state.recent_paths_picker = None,
+        KeyCode::Char('s') | KeyCode::Down => {
+            picker.selected = (picker.selected + 1).min(picker.items.len().saturating_sub(1));
+        }
+        KeyCode::Char('w') | KeyCode::Up => {
+            picker.selected = picker.selected.saturating_sub(1);
+        }
+        KeyCode::Home => picker.selected = 0,
+        KeyCode::End => picker.selected = picker.items.len().saturating_sub(1),
+        KeyCode::Enter => {
+            let Some(picked) = picker.items.get(picker.selected).cloned() else { return false; };
+            state.recent_paths_picker = None;
+            apply_picked_recent_path(state, picked);
+        }
+        _ => {}
+    }
+    false
 }
 
 /// resolve which TreeRow is currently focused, given the raw pieces both the
@@ -2447,12 +2530,19 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
 const ADD_OPTIONS_FIELD_COUNT: usize = 6;
 
 fn handle_add_options_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    // recent-paths dropdown captures all input until dismissed
+    if (state.recent_paths_picker.is_some()) {
+        return handle_recent_paths_picker_key(code, modifiers, state);
+    }
     let Some(form) = state.add_options.as_mut() else { return false; };
 
     // text-edit mode for the save_path field
     if (form.edit_buffer.is_some()) {
         match (code, modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+            // ctrl+r only in edit mode: the picker fills the edit buffer, so
+            // it only makes sense while the buffer exists
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => open_recent_paths_picker(state),
             (KeyCode::Esc, _) => form.edit_buffer = None,
             (KeyCode::Enter, _) => {
                 let buffer = form.edit_buffer.take().map(|field| field.buffer().to_string()).unwrap_or_default();
@@ -2613,8 +2703,22 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
 }
 
 fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    // recent-paths dropdown captures all input until dismissed, so picker
+    // keys never leak into the underlying text field (same routing style
+    // handle_settings_key uses for the interface picker)
+    if (state.recent_paths_picker.is_some()) {
+        return handle_recent_paths_picker_key(code, modifiers, state);
+    }
     match (code, modifiers) {
         (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+            // gated on the move prompt: rename and every other prompt kind
+            // ignores ctrl+r
+            let is_move = state.prompt.as_ref()
+                .map(|prompt| matches!(prompt.action, PromptAction::Move))
+                .unwrap_or(false);
+            if (is_move) { open_recent_paths_picker(state); }
+        }
         (KeyCode::Esc, _) => state.prompt = None,
         (KeyCode::Enter, KeyModifiers::SHIFT) => {
             if let Some(prompt) = state.prompt.as_mut() {
