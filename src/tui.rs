@@ -1122,6 +1122,22 @@ enum RenameConfirmKind {
     RevertToDefaultLayout { index: usize },
 }
 
+/// credentials overlay for a fetch that answered AuthRequired. holds the
+/// paused AddDispatch so the batch resumes after this entry is retried,
+/// failed, or skipped. both fields are ordinary TextFields with the full
+/// landed editing behavior; masking happens at the draw site only.
+struct AuthPrompt {
+    url: String,
+    scheme: String,
+    hint: String,
+    /// true after a failed retry: draw adds "authentication failed, try again"
+    retry_notice: bool,
+    username: TextField,
+    password: TextField,
+    focus_password: bool,
+    dispatch: AddDispatch,
+}
+
 /// a single row in the sidebar flat list. headers are visual separators;
 /// selecting one is a no-op. selectable items set the active filter.
 #[derive(Clone, PartialEq)]
@@ -1295,6 +1311,9 @@ struct AppState {
     prompt: Option<Prompt>,
     /// sequential rename/move confirmation flow; shown as an overlay
     rename_confirm: Option<RenameConfirm>,
+    /// credentials overlay opened when the daemon answers an Add with
+    /// Response::AuthRequired. boxed: it parks the whole in-flight batch.
+    auth_prompt: Option<Box<AuthPrompt>>,
     /// add-options form opened after the multi-line add prompt is confirmed
     add_options: Option<AddOptionsForm>,
     /// post-add file priority step. opened when torrents are added paused.
@@ -1442,6 +1461,7 @@ impl AppState {
             mode: Mode::Main,
             prompt: None,
             rename_confirm: None,
+            auth_prompt: None,
             add_options: None,
             priority_step: None,
             add_results: None,
@@ -1712,6 +1732,10 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     let exit = if (state.rename_confirm.is_some()) {
                         handle_rename_confirm_key(key.code, &mut state);
                         false
+                    } else if (state.auth_prompt.is_some()) {
+                        // same rank as rename_confirm; the two can never be
+                        // active at once (auth happens before the torrent exists)
+                        handle_auth_prompt_key(key.code, key.modifiers, &mut state)
                     } else if (state.prompt.is_some()) {
                         handle_prompt_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_results.is_some()) {
@@ -2902,6 +2926,21 @@ fn run_add_dispatch(mut dispatch: AddDispatch, state: &mut AppState) {
                 record_added_entry(&mut dispatch, &uri, &options);
                 dispatch.next += 1;
             }
+            Ok(Response::AuthRequired { url, scheme, hint }) => {
+                // stop the batch here; entries already dispatched keep their
+                // results. esc/enter on the prompt resumes from this entry.
+                state.auth_prompt = Some(Box::new(AuthPrompt {
+                    url,
+                    scheme,
+                    hint,
+                    retry_notice: false,
+                    username: TextField::new(String::new()),
+                    password: TextField::new(String::new()),
+                    focus_password: false,
+                    dispatch,
+                }));
+                return;
+            }
             Ok(Response::Err(message)) => {
                 dispatch.failures.push(format!("{}: {}", uri, message));
                 dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err(message) });
@@ -4040,6 +4079,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
         if (state.rename_confirm.is_some()) {
             draw_rename_confirm(frame, state);
         }
+        if (state.auth_prompt.is_some()) {
+            draw_auth_prompt(frame, state);
+        }
         return;
     }
     if (matches!(state.mode, Mode::Settings(_))) {
@@ -4057,6 +4099,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     }
     if (state.rename_confirm.is_some()) {
         draw_rename_confirm(frame, state);
+    }
+    if (state.auth_prompt.is_some()) {
+        draw_auth_prompt(frame, state);
     }
     if (state.column_picker.is_some()) {
         draw_column_picker(frame, state);
@@ -4472,6 +4517,21 @@ fn render_field_with_cursor(field: &TextField) -> Vec<Span<'static>> {
     ]
 }
 
+/// like render_field_with_cursor but every buffer char renders as '*'.
+/// masking lives here at the draw site; TextField itself is untouched.
+fn render_masked_field_with_cursor(field: &TextField) -> Vec<Span<'static>> {
+    let length = field.buffer().chars().count();
+    let cursor = field.cursor().min(length);
+    let before = "*".repeat(cursor);
+    let at = if (cursor == length) { " ".to_string() } else { "*".to_string() };
+    let after = if (cursor >= length) { String::new() } else { "*".repeat(length - cursor - 1) };
+    vec![
+        Span::raw(before),
+        Span::styled(at, Style::default().fg(Color::Black).bg(Color::Yellow)),
+        Span::raw(after),
+    ]
+}
+
 fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
     let Some(prompt) = &state.prompt else { return; };
     let area = frame.area();
@@ -4795,6 +4855,95 @@ fn draw_rename_confirm(frame: &mut ratatui::Frame, state: &AppState) {
     );
 }
 
+fn draw_auth_prompt(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(prompt) = &state.auth_prompt else { return; };
+    let area = frame.area();
+    let height = 9u16.min(area.height.saturating_sub(2));
+    let width = (area.width * 70 / 100).clamp(50, area.width.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" authentication required ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Length(1), // url + scheme
+        Constraint::Length(1), // hint (+ retry notice)
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // username
+        Constraint::Length(1), // password
+        Constraint::Length(1), // gap
+        Constraint::Length(1), // key hint
+    ])
+    .split(inner);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
+            format!("{} ({})", prompt.url, prompt.scheme),
+            Style::default().fg(Color::DarkGray),
+        ))),
+        layout[0],
+    );
+    let hint_text = if (prompt.retry_notice) {
+        format!("{}; authentication failed, try again", prompt.hint)
+    } else {
+        prompt.hint.clone()
+    };
+    frame.render_widget(
+        Paragraph::new(hint_text).style(Style::default().fg(Color::Red)),
+        layout[1],
+    );
+
+    frame.render_widget(
+        Paragraph::new(auth_field_line("username: ", &prompt.username, !prompt.focus_password, false)),
+        layout[3],
+    );
+    frame.render_widget(
+        Paragraph::new(auth_field_line("password: ", &prompt.password, prompt.focus_password, true)),
+        layout[4],
+    );
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::styled(" tab ", Style::default().fg(Color::Yellow)),
+            Span::raw("switch field  "),
+            Span::styled("enter ", Style::default().fg(Color::Yellow)),
+            Span::raw("submit  "),
+            Span::styled("esc ", Style::default().fg(Color::Yellow)),
+            Span::raw("skip entry"),
+        ])).style(Style::default().fg(Color::Gray)),
+        layout[6],
+    );
+}
+
+/// one labeled credential row. the focused field gets the block cursor;
+/// masked fields render '*' per char whether focused or not.
+fn auth_field_line(label: &'static str, field: &TextField, focused: bool, masked: bool) -> Line<'static> {
+    let marker = if (focused) { "› " } else { "  " };
+    let mut spans = vec![
+        Span::styled(marker, Style::default().fg(Color::Yellow)),
+        Span::raw(label),
+    ];
+    if (focused && masked) {
+        spans.extend(render_masked_field_with_cursor(field));
+    } else if (focused) {
+        spans.extend(render_field_with_cursor(field));
+    } else if (masked) {
+        spans.push(Span::raw("*".repeat(field.buffer().chars().count())));
+    } else {
+        spans.push(Span::raw(field.buffer().to_string()));
+    }
+    Line::from(spans)
+}
+
 fn handle_rename_confirm_key(key: KeyCode, state: &mut AppState) {
     let Some(confirm) = state.rename_confirm.as_mut() else { return; };
     let Some(concern) = confirm.concerns.front().cloned() else { return; };
@@ -4846,6 +4995,133 @@ fn handle_rename_confirm_key(key: KeyCode, state: &mut AppState) {
     }
     if (confirm.concerns.is_empty()) {
         resend_rename_confirm(state);
+    }
+}
+
+fn handle_auth_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        (KeyCode::Esc, _) => {
+            // skip this entry and keep going with the rest of the batch
+            let Some(prompt) = state.auth_prompt.take() else { return false; };
+            let AuthPrompt { mut dispatch, .. } = *prompt;
+            if let Some(uri) = dispatch.entries.get(dispatch.next) {
+                dispatch.failures.push(format!("{}: authentication cancelled", uri));
+                dispatch.results.push(AddResultEntry {
+                    source: uri.clone(),
+                    outcome: Err("authentication cancelled".to_string()),
+                });
+            }
+            dispatch.next += 1;
+            run_add_dispatch(dispatch, state);
+        }
+        (KeyCode::Tab, _) | (KeyCode::Up, _) | (KeyCode::Down, _) => {
+            if let Some(prompt) = state.auth_prompt.as_mut() {
+                prompt.focus_password = !prompt.focus_password;
+            }
+        }
+        (KeyCode::Enter, _) => submit_auth_prompt(state),
+        (KeyCode::Char('v'), KeyModifiers::CONTROL) => {
+            let Ok(mut clipboard) = arboard::Clipboard::new() else { return false; };
+            let Ok(text) = clipboard.get_text() else { return false; };
+            if let Some(field) = auth_prompt_field(state) { field.paste(&text); }
+        }
+        (KeyCode::Left, KeyModifiers::CONTROL) | (KeyCode::Left, KeyModifiers::ALT) => {
+            if let Some(field) = auth_prompt_field(state) { field.move_word_left(); }
+        }
+        (KeyCode::Right, KeyModifiers::CONTROL) | (KeyCode::Right, KeyModifiers::ALT) => {
+            if let Some(field) = auth_prompt_field(state) { field.move_word_right(); }
+        }
+        (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
+            if let Some(field) = auth_prompt_field(state) { field.delete_word_backward(); }
+        }
+        (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Delete, KeyModifiers::ALT) => {
+            if let Some(field) = auth_prompt_field(state) { field.delete_word_forward(); }
+        }
+        (KeyCode::Left, _) => { if let Some(field) = auth_prompt_field(state) { field.move_left(); } }
+        (KeyCode::Right, _) => { if let Some(field) = auth_prompt_field(state) { field.move_right(); } }
+        (KeyCode::Home, _) => { if let Some(field) = auth_prompt_field(state) { field.move_home(); } }
+        (KeyCode::End, _) => { if let Some(field) = auth_prompt_field(state) { field.move_end(); } }
+        (KeyCode::Delete, _) => { if let Some(field) = auth_prompt_field(state) { field.delete_forward(); } }
+        (KeyCode::Backspace, _) => { if let Some(field) = auth_prompt_field(state) { field.backspace(); } }
+        (KeyCode::Char(character), modifiers)
+            if !modifiers.contains(KeyModifiers::CONTROL)
+                && !modifiers.contains(KeyModifiers::ALT) =>
+        {
+            if let Some(field) = auth_prompt_field(state) { field.insert_char(character); }
+        }
+        _ => {}
+    }
+    false
+}
+
+fn auth_prompt_field(state: &mut AppState) -> Option<&mut TextField> {
+    let prompt = state.auth_prompt.as_mut()?;
+    if (prompt.focus_password) { Some(&mut prompt.password) } else { Some(&mut prompt.username) }
+}
+
+fn submit_auth_prompt(state: &mut AppState) {
+    let Some(prompt) = state.auth_prompt.take() else { return; };
+    let AuthPrompt { username, password, mut dispatch, .. } = *prompt;
+    let entry_index = dispatch.next;
+    let Some(uri) = dispatch.entries.get(entry_index).cloned() else {
+        // defensive: position ran past the batch; just close it out
+        finish_add_dispatch(dispatch, state);
+        return;
+    };
+    let options = dispatch.options[entry_index].clone();
+    let save_path = if (options.save_path.trim().is_empty()) { None } else { Some(options.save_path.clone()) };
+    // identical Add to the first attempt, credentials filled in. used for
+    // this one transfer server-side and dropped.
+    let response = client::send(Request::Add {
+        uri: uri.clone(),
+        save_path,
+        category: None,
+        start_paused: true,
+        content_layout: options.content_layout,
+        credentials: Some(crate::ipc::TransferCredentials {
+            username: username.buffer().to_string(),
+            password: password.buffer().to_string(),
+        }),
+    });
+    match response {
+        Ok(Response::Added { .. }) => {
+            record_added_entry(&mut dispatch, &uri, &options);
+            dispatch.next += 1;
+            run_add_dispatch(dispatch, state);
+        }
+        Ok(Response::AuthRequired { url, scheme, hint }) => {
+            // wrong credentials: keep the username, clear the password,
+            // show the fresh hint. no retry cap; esc remains the way out.
+            state.auth_prompt = Some(Box::new(AuthPrompt {
+                url,
+                scheme,
+                hint,
+                retry_notice: true,
+                username,
+                password: TextField::new(String::new()),
+                focus_password: true,
+                dispatch,
+            }));
+        }
+        Ok(Response::Err(message)) => {
+            dispatch.failures.push(format!("{}: {}", uri, message));
+            dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err(message) });
+            dispatch.next += 1;
+            run_add_dispatch(dispatch, state);
+        }
+        Ok(_) => {
+            dispatch.failures.push(format!("{}: unexpected response", uri));
+            dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err("unexpected response".to_string()) });
+            dispatch.next += 1;
+            run_add_dispatch(dispatch, state);
+        }
+        Err(error) => {
+            dispatch.failures.push(format!("{}: {}", uri, error));
+            dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err(error.to_string()) });
+            dispatch.next += 1;
+            run_add_dispatch(dispatch, state);
+        }
     }
 }
 
