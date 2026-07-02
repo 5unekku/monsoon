@@ -42,6 +42,9 @@ pub struct Config {
     /// what to do with untracked files inside a renamed folder
     #[serde(default = "default_ask")]
     pub rename_untracked_files: String,
+    /// show the per-entry results overlay after adding torrents: always | never
+    #[serde(default = "default_always")]
+    pub add_result_review: String,
     pub enable_dht: bool,
     pub enable_lsd: bool,
     pub enable_upnp: bool,
@@ -188,6 +191,7 @@ fn default_true() -> bool { true }
 fn default_ip_filter_refresh_hours() -> u64 { 24 }
 fn default_content_layout() -> String { "if_multiple".to_string() }
 fn default_ask() -> String { "ask".to_string() }
+fn default_always() -> String { "always".to_string() }
 fn default_recent_paths_limit() -> u16 { 5 }
 
 /// move-to-front dedup, then truncate to limit. limit 0 clears the list.
@@ -225,6 +229,7 @@ impl Default for Config {
             rename_merge_same: default_ask(),
             rename_merge_unrelated: default_ask(),
             rename_untracked_files: default_ask(),
+            add_result_review: default_always(),
             enable_dht: true,
             enable_lsd: true,
             enable_upnp: true,
@@ -328,6 +333,9 @@ impl Config {
             "none" | "socks4" | "socks5" | "socks5_pw" | "http" | "http_pw" | "i2p"
         )) {
             self.proxy_type = default.proxy_type.clone();
+        }
+        if (!matches!(self.add_result_review.as_str(), "always" | "never")) {
+            self.add_result_review = default.add_result_review.clone();
         }
 
         // tui sanity
@@ -512,5 +520,28 @@ mod tests {
         };
         config.sanitize();
         assert_eq!(config.recent_save_paths, list(&["/one", "/two"]));
+    }
+
+    #[test]
+    fn add_result_review_defaults_to_always() {
+        assert_eq!(Config::default().add_result_review, "always");
+    }
+
+    #[test]
+    fn sanitize_resets_invalid_add_result_review() {
+        let mut config = Config::default();
+        config.add_result_review = "sometimes".to_string();
+        config.sanitize();
+        assert_eq!(config.add_result_review, "always");
+    }
+
+    #[test]
+    fn sanitize_keeps_valid_add_result_review_values() {
+        for value in ["always", "never"] {
+            let mut config = Config::default();
+            config.add_result_review = value.to_string();
+            config.sanitize();
+            assert_eq!(config.add_result_review, value);
+        }
     }
 }

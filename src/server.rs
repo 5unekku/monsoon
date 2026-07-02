@@ -403,6 +403,12 @@ impl App {
                 }
                 self.config.rename_untracked_files = value.to_string();
             }
+            "add_result_review" => {
+                if (!matches!(value, "always" | "never")) {
+                    return Err(anyhow::anyhow!("add_result_review must be: always | never"));
+                }
+                self.config.add_result_review = value.to_string();
+            }
             "watch_directories" => {
                 self.config.watch_directories = value.lines()
                     .map(|line| line.trim().to_string())
