@@ -2849,72 +2849,111 @@ fn advance_add_options(state: &mut AppState) {
     dispatch_add_options(form, state);
 }
 
+/// in-flight add-batch dispatch state. normally consumed in one pass by
+/// run_add_dispatch; parked inside the auth prompt when an entry needs
+/// credentials, so the batch can resume where it stopped.
+struct AddDispatch {
+    entries: Vec<String>,
+    options: Vec<AddOptions>,
+    /// index of the next entry to send
+    next: usize,
+    succeeded: usize,
+    failures: Vec<String>,
+    results: Vec<AddResultEntry>,
+    organize_indices: Vec<usize>,
+    organize_entries: Vec<String>,
+    organize_resume: Vec<bool>,
+}
+
 fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
-    let mut succeeded: usize = 0;
-    let mut failures: Vec<String> = Vec::new();
-    let mut results: Vec<AddResultEntry> = Vec::new();
-    let mut organize_indices: Vec<usize> = Vec::new();
-    let mut organize_entries: Vec<String> = Vec::new();
-    let mut organize_resume: Vec<bool> = Vec::new();
-    for (entry_index, uri) in form.entries.iter().enumerate() {
-        let options = &form.options[entry_index];
+    run_add_dispatch(AddDispatch {
+        entries: form.entries,
+        options: form.options,
+        next: 0,
+        succeeded: 0,
+        failures: Vec::new(),
+        results: Vec::new(),
+        organize_indices: Vec::new(),
+        organize_entries: Vec::new(),
+        organize_resume: Vec::new(),
+    }, state);
+}
+
+fn run_add_dispatch(mut dispatch: AddDispatch, state: &mut AppState) {
+    while (dispatch.next < dispatch.entries.len()) {
+        let entry_index = dispatch.next;
+        let uri = dispatch.entries[entry_index].clone();
+        let options = dispatch.options[entry_index].clone();
         let save_path = if (options.save_path.trim().is_empty()) { None } else { Some(options.save_path.clone()) };
         // always add paused: the organize step must run before any data
         // downloads, regardless of the user's requested start/pause option.
         // `options.start` is remembered below and applied once the step
         // concludes for this entry.
-        let added_id = match client::send(Request::Add {
+        let response = client::send(Request::Add {
             uri: uri.clone(),
             save_path,
             category: None,
             start_paused: true,
             content_layout: options.content_layout,
             credentials: None,
-        }) {
-            Ok(Response::Added { id }) => Some(id),
+        });
+        match response {
+            Ok(Response::Added { .. }) => {
+                record_added_entry(&mut dispatch, &uri, &options);
+                dispatch.next += 1;
+            }
             Ok(Response::Err(message)) => {
-                failures.push(format!("{}: {}", uri, message));
-                results.push(AddResultEntry { source: uri.clone(), outcome: Err(message) });
-                None
+                dispatch.failures.push(format!("{}: {}", uri, message));
+                dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err(message) });
+                dispatch.next += 1;
             }
             Ok(_) => {
-                failures.push(format!("{}: unexpected response", uri));
-                results.push(AddResultEntry { source: uri.clone(), outcome: Err("unexpected response".to_string()) });
-                None
+                dispatch.failures.push(format!("{}: unexpected response", uri));
+                dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err("unexpected response".to_string()) });
+                dispatch.next += 1;
             }
             Err(error) => {
-                failures.push(format!("{}: {}", uri, error));
-                results.push(AddResultEntry { source: uri.clone(), outcome: Err(error.to_string()) });
-                None
+                dispatch.failures.push(format!("{}: {}", uri, error));
+                dispatch.results.push(AddResultEntry { source: uri.clone(), outcome: Err(error.to_string()) });
+                dispatch.next += 1;
             }
-        };
-        if (added_id.is_none()) { continue; }
-        results.push(AddResultEntry { source: uri.clone(), outcome: Ok(()) });
-        succeeded += 1;
-        let new_index = match client::send(Request::List) {
-            Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
-            _ => continue,
-        };
-        if (options.sequential) {
-            let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
         }
-        if (options.first_last) {
-            let _ = client::send(Request::SetFirstLastPriority { index: new_index, enabled: true });
-        }
-        organize_indices.push(new_index);
-        organize_entries.push(uri.clone());
-        organize_resume.push(options.start);
     }
+    finish_add_dispatch(dispatch, state);
+}
+
+/// post-add bookkeeping shared by first-pass adds and auth retries:
+/// success accounting plus sequential/first-last tweaks and
+/// organize-step queueing.
+fn record_added_entry(dispatch: &mut AddDispatch, uri: &str, options: &AddOptions) {
+    dispatch.succeeded += 1;
+    dispatch.results.push(AddResultEntry { source: uri.to_string(), outcome: Ok(()) });
+    let new_index = match client::send(Request::List) {
+        Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
+        _ => return,
+    };
+    if (options.sequential) {
+        let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
+    }
+    if (options.first_last) {
+        let _ = client::send(Request::SetFirstLastPriority { index: new_index, enabled: true });
+    }
+    dispatch.organize_indices.push(new_index);
+    dispatch.organize_entries.push(uri.to_string());
+    dispatch.organize_resume.push(options.start);
+}
+
+fn finish_add_dispatch(dispatch: AddDispatch, state: &mut AppState) {
     // one-line summary stays in both modes: it is the status line and it
     // keeps the status bar meaningful after the overlay closes
-    if (failures.is_empty()) {
-        state.error = Some(format!("added {} torrent(s)", succeeded));
-    } else if (succeeded == 0) {
-        state.error = Some(format!("all sources failed: {}", failures.join("; ")));
+    if (dispatch.failures.is_empty()) {
+        state.error = Some(format!("added {} torrent(s)", dispatch.succeeded));
+    } else if (dispatch.succeeded == 0) {
+        state.error = Some(format!("all sources failed: {}", dispatch.failures.join("; ")));
     } else {
         state.error = Some(format!(
             "added {} ok, {} failed: {}",
-            succeeded, failures.len(), failures.join("; ")
+            dispatch.succeeded, dispatch.failures.len(), dispatch.failures.join("; ")
         ));
     }
     state.last_poll = Instant::now() - POLL_INTERVAL;
@@ -2922,11 +2961,13 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
     // organize step is created in the same call; the overlay outranks it in
     // the input ladder, so review happens first and dismissing reveals the
     // step already queued underneath.
-    if (state.add_result_review != "never" && !results.is_empty()) {
-        state.add_results = Some(AddResultsReview { entries: results, focused: 0 });
+    if (state.add_result_review != "never" && !dispatch.results.is_empty()) {
+        state.add_results = Some(AddResultsReview { entries: dispatch.results, focused: 0 });
     }
-    if (!organize_indices.is_empty()) {
-        state.priority_step = Some(Box::new(PriorityStep::new(organize_entries, organize_indices, organize_resume)));
+    if (!dispatch.organize_indices.is_empty()) {
+        state.priority_step = Some(Box::new(PriorityStep::new(
+            dispatch.organize_entries, dispatch.organize_indices, dispatch.organize_resume,
+        )));
     }
 }
 
