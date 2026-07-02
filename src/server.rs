@@ -1260,7 +1260,16 @@ impl App {
                         }
                         Response::Added { id: hash }
                     }
-                    Err(error) => Response::Err(error.to_string()),
+                    // "needs credentials" is a soft failure the tui can answer;
+                    // everything else stays a plain error, exactly as before.
+                    Err(error) => match error.downcast_ref::<crate::sources::AuthRequiredError>() {
+                        Some(auth_error) => Response::AuthRequired {
+                            url: uri.clone(),
+                            scheme: auth_error.scheme.clone(),
+                            hint: auth_error.hint.clone(),
+                        },
+                        None => Response::Err(error.to_string()),
+                    },
                 }
             }
             Request::Remove { index, delete_files } => match self.remove(index, delete_files) {
@@ -2138,6 +2147,10 @@ pub fn run(quiet: bool) -> Result<()> {
         libtorrent = %crate::session::libtorrent_version(),
         "daemon started (tcp-only; local socket not available on this platform)"
     );
+
+    // one info line so a missing libssh2 backend is visible before anyone
+    // tries an sftp url. the probe result is cached for the process lifetime.
+    tracing::info!(supported = crate::sources::sftp_supported(), "libcurl sftp support probed");
 
     let mut last_alert_check = Instant::now();
     let mut last_resume_save = Instant::now();
