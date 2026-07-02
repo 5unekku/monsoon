@@ -1258,7 +1258,7 @@ impl App {
                         if let Some(path) = save_path.as_deref() {
                             self.record_recent_save_path(path);
                         }
-                        Response::Added { id: hash }
+                        Response::Added { id: hash, index: self.torrents.len().saturating_sub(1) }
                     }
                     // "needs credentials" is a soft failure the tui can answer;
                     // everything else stays a plain error, exactly as before.

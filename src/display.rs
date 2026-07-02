@@ -30,7 +30,7 @@ pub fn print_response(response: Response) {
     match response {
         Response::TorrentList(list) => print_torrent_list(&list),
         Response::TorrentDetail(detail) => print_torrent_detail(&detail),
-        Response::Added { id } => println!("added: {}", id),
+        Response::Added { id, .. } => println!("added: {}", id),
         Response::Stats(stats) => print_stats(&stats),
         Response::Config(toml) => print!("{}", toml),
         Response::RenameResult { renamed, rejected } => print_rename_result(&renamed, &rejected),

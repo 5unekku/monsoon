@@ -300,7 +300,13 @@ pub struct FeedInfo {
 pub enum Response {
     TorrentList(Vec<TorrentInfo>),
     TorrentDetail(Box<TorrentDetail>),
-    Added { id: String },
+    /// index is the daemon-side position of the new torrent, so the tui can
+    /// follow up (organize, sequential, resume) without a List round-trip
+    Added {
+        id: String,
+        #[serde(default)]
+        index: usize,
+    },
     Stats(StatsInfo),
     Config(String),
     /// rename outcome. `renamed` are file indices that passed validation and

@@ -1753,8 +1753,7 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                     } else if (state.confirm_delete.is_some()) {
                         handle_delete_confirm_key(key.code, key.modifiers, &mut state)
                     } else if (state.confirm_revert_layout.is_some()) {
-                        handle_revert_layout_confirm_key(key.code, &mut state);
-                        false
+                        handle_revert_layout_confirm_key(key.code, key.modifiers, &mut state)
                     } else if (state.column_picker.is_some()) {
                         handle_picker_key(key.code, key.modifiers, &mut state)
                     } else if (state.add_options.is_some()) {
@@ -2443,11 +2442,13 @@ fn open_revert_layout_confirm(state: &mut AppState) {
     state.confirm_revert_layout = Some(ConfirmRevertLayout { torrent_index: index, torrent_name: name });
 }
 
-/// y/enter dispatches the revert; any other key cancels. a
-/// RenameConfirmation response routes into the shared rename_confirm
-/// overlay, whose resend path carries the RevertToDefaultLayout kind.
-fn handle_revert_layout_confirm_key(code: KeyCode, state: &mut AppState) {
-    let Some(confirm) = state.confirm_revert_layout.take() else { return; };
+/// y/enter dispatches the revert; ctrl+c quits the app (matching
+/// ConfirmDelete); any other key cancels. a RenameConfirmation response
+/// routes into the shared rename_confirm overlay, whose resend path
+/// carries the RevertToDefaultLayout kind. returns true to quit.
+fn handle_revert_layout_confirm_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    if (code == KeyCode::Char('c') && modifiers == KeyModifiers::CONTROL) { return true; }
+    let Some(confirm) = state.confirm_revert_layout.take() else { return false; };
     match code {
         KeyCode::Char('y') | KeyCode::Enter => {
             match client::send(Request::RevertToDefaultLayout { index: confirm.torrent_index, decisions: None }) {
@@ -2480,6 +2481,7 @@ fn handle_revert_layout_confirm_key(code: KeyCode, state: &mut AppState) {
         }
         _ => {}
     }
+    false
 }
 
 fn draw_revert_layout_confirm(frame: &mut ratatui::Frame, state: &AppState) {
@@ -2922,8 +2924,8 @@ fn run_add_dispatch(mut dispatch: AddDispatch, state: &mut AppState) {
             credentials: None,
         });
         match response {
-            Ok(Response::Added { .. }) => {
-                record_added_entry(&mut dispatch, &uri, &options);
+            Ok(Response::Added { index, .. }) => {
+                record_added_entry(&mut dispatch, &uri, &options, index);
                 dispatch.next += 1;
             }
             Ok(Response::AuthRequired { url, scheme, hint }) => {
@@ -2964,13 +2966,9 @@ fn run_add_dispatch(mut dispatch: AddDispatch, state: &mut AppState) {
 /// post-add bookkeeping shared by first-pass adds and auth retries:
 /// success accounting plus sequential/first-last tweaks and
 /// organize-step queueing.
-fn record_added_entry(dispatch: &mut AddDispatch, uri: &str, options: &AddOptions) {
+fn record_added_entry(dispatch: &mut AddDispatch, uri: &str, options: &AddOptions, new_index: usize) {
     dispatch.succeeded += 1;
     dispatch.results.push(AddResultEntry { source: uri.to_string(), outcome: Ok(()) });
-    let new_index = match client::send(Request::List) {
-        Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
-        _ => return,
-    };
     if (options.sequential) {
         let _ = client::send(Request::SetSequential { index: new_index, enabled: true });
     }
@@ -5085,8 +5083,8 @@ fn submit_auth_prompt(state: &mut AppState) {
         }),
     });
     match response {
-        Ok(Response::Added { .. }) => {
-            record_added_entry(&mut dispatch, &uri, &options);
+        Ok(Response::Added { index, .. }) => {
+            record_added_entry(&mut dispatch, &uri, &options, index);
             dispatch.next += 1;
             run_add_dispatch(dispatch, state);
         }
