@@ -2036,7 +2036,7 @@ fn open_add_prompt(state: &mut AppState) {
     let prefill = clipboard_magnet_or_url().unwrap_or_default();
     state.prompt = Some(Prompt {
         title: "add torrent (shift+enter to add another line)".to_string(),
-        helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, or ~/foo.torrent — one per line".to_string(),
+        helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, ~/foo.torrent, or a glob (*.torrent); one per line".to_string(),
         lines: vec![TextField::with_completion(prefill, CompletionSource::Filesystem)],
         cursor_line: 0,
         action: PromptAction::Add,
@@ -2451,13 +2451,37 @@ fn submit_prompt(prompt: &Prompt, state: &mut AppState) -> Result<()> {
             }
         }
         PromptAction::Add => {
-            // collect non-empty entries and open the per-torrent options
-            // form. nothing hits the daemon yet — the options form owns
-            // the dispatch on its own confirmation.
-            let entries: Vec<String> = prompt.lines.iter()
-                .map(|field| field.buffer().trim().to_string())
-                .filter(|line| !line.is_empty())
-                .collect();
+            // classify each line exactly the way the daemon's resolve() will,
+            // expand globs client-side, and reject verifiably-bad local
+            // entries while the prompt is still open. remote sources always
+            // pass through unverified; the daemon's fetch is the judge there.
+            use crate::sources::{classify, expand_glob, SourceKind};
+            let mut entries: Vec<String> = Vec::new();
+            for field in &prompt.lines {
+                let line = field.buffer().trim();
+                match classify(line) {
+                    None => continue,
+                    Some(SourceKind::Magnet) | Some(SourceKind::Url) => {
+                        entries.push(line.to_string());
+                    }
+                    Some(SourceKind::LocalPath(path)) => {
+                        if (!path.exists()) {
+                            return Err(anyhow::anyhow!("file not found: {}", path.display()));
+                        }
+                        entries.push(path.to_string_lossy().to_string());
+                    }
+                    Some(SourceKind::LocalGlob(pattern)) => {
+                        let matches = expand_glob(&pattern)
+                            .map_err(|error| anyhow::anyhow!("{}", error))?;
+                        if (matches.is_empty()) {
+                            return Err(anyhow::anyhow!("no matches: {}", line));
+                        }
+                        entries.extend(
+                            matches.into_iter().map(|path| path.to_string_lossy().to_string()),
+                        );
+                    }
+                }
+            }
             if (entries.is_empty()) {
                 return Err(anyhow::anyhow!("no sources provided"));
             }
