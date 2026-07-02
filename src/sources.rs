@@ -102,6 +102,17 @@ pub fn classify(input: &str) -> Option<SourceKind> {
     Some(SourceKind::LocalPath(path))
 }
 
+/// expand a glob pattern against the local filesystem. matches come back in
+/// the glob crate's deterministic per-directory alphabetical order.
+/// unreadable entries yielded by the walk are skipped; they would fail at
+/// add time anyway. directory matches are not filtered out on purpose: the
+/// daemon rejects them with a real error the results overlay can show.
+pub fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>, String> {
+    let paths = glob::glob(pattern)
+        .map_err(|error| format!("bad glob pattern: {}", error))?;
+    Ok(paths.filter_map(|entry| entry.ok()).collect())
+}
+
 /// classify and resolve one user input string into a Source. on http/ftp
 /// the file is downloaded to a temp path; the caller owns cleanup. glob
 /// patterns are the client's job to expand and are rejected here.
@@ -257,7 +268,7 @@ pub fn fetch_url(dest: &std::path::Path, url: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, SourceKind};
+    use super::{classify, expand_glob, SourceKind};
     use std::path::PathBuf;
 
     /// tiny scoped tempdir, removed on drop. avoids a tempfile dev-dependency
@@ -353,5 +364,39 @@ mod tests {
     fn nonexistent_plain_path_stays_local_path() {
         let path = "/monsoon-does-not-exist/a.torrent";
         assert_eq!(classify(path), Some(SourceKind::LocalPath(PathBuf::from(path))));
+    }
+
+    #[test]
+    fn expand_glob_returns_alphabetical_matches() {
+        let dir = TestDir::new("expand-order");
+        dir.file("b.torrent");
+        dir.file("a.torrent");
+        dir.file("notes.txt");
+        let pattern = format!("{}/*.torrent", dir.0.display());
+        let matches = expand_glob(&pattern).unwrap();
+        assert_eq!(matches, vec![dir.0.join("a.torrent"), dir.0.join("b.torrent")]);
+    }
+
+    #[test]
+    fn expand_glob_zero_matches_is_ok_and_empty() {
+        let dir = TestDir::new("expand-empty");
+        dir.file("a.torrent");
+        let pattern = format!("{}/*.nope", dir.0.display());
+        assert_eq!(expand_glob(&pattern).unwrap(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn expand_glob_recursive_double_star_descends() {
+        let dir = TestDir::new("expand-recursive");
+        dir.file("sub/inner/c.torrent");
+        let pattern = format!("{}/**/c.torrent", dir.0.display());
+        let matches = expand_glob(&pattern).unwrap();
+        assert!(matches.contains(&dir.0.join("sub/inner/c.torrent")));
+    }
+
+    #[test]
+    fn expand_glob_bad_pattern_is_a_clear_error() {
+        // unclosed character class is a pattern error, not a silent empty
+        assert!(expand_glob("/tmp/[").is_err());
     }
 }
