@@ -929,6 +929,119 @@ enum InputPurpose {
     ContentFilter,
 }
 
+/// cached classification for one add-prompt line. a thin projection of
+/// sources::classify, the same function submit and the daemon use, so the
+/// indicator can never disagree with what dispatch actually does.
+#[derive(Clone, Debug, PartialEq)]
+enum LineIndicator {
+    /// blank line, draw nothing
+    Empty,
+    Magnet,
+    Url,
+    FileOk,
+    /// glob pattern with this many matches right now
+    Glob(usize),
+    NotFound,
+}
+
+impl LineIndicator {
+    /// suffix label text and color; None draws nothing
+    fn label(&self) -> Option<(String, Color)> {
+        match self {
+            LineIndicator::Empty => None,
+            LineIndicator::Magnet => Some(("magnet".to_string(), Color::Green)),
+            LineIndicator::Url => Some(("url".to_string(), Color::Green)),
+            LineIndicator::FileOk => Some(("file ok".to_string(), Color::Green)),
+            LineIndicator::Glob(0) => Some(("glob: 0 matches".to_string(), Color::Red)),
+            LineIndicator::Glob(count) => Some((format!("glob: {} matches", count), Color::Green)),
+            LineIndicator::NotFound => Some(("not found".to_string(), Color::Red)),
+        }
+    }
+}
+
+/// derive the indicator for one line: one stat for paths, one glob walk for
+/// patterns. runs inline per edit on the edited line only; the spec's risks
+/// note names debouncing as the upgrade path if huge directories ever lag.
+fn classify_line(line: &str) -> LineIndicator {
+    use crate::sources::{classify, expand_glob, SourceKind};
+    match classify(line) {
+        None => LineIndicator::Empty,
+        Some(SourceKind::Magnet) => LineIndicator::Magnet,
+        Some(SourceKind::Url) => LineIndicator::Url,
+        Some(SourceKind::LocalPath(path)) => {
+            if (path.exists()) { LineIndicator::FileOk } else { LineIndicator::NotFound }
+        }
+        Some(SourceKind::LocalGlob(pattern)) => LineIndicator::Glob(
+            expand_glob(&pattern).map(|matches| matches.len()).unwrap_or(0),
+        ),
+    }
+}
+
+/// recompute the cached indicator for the focused prompt line. only the add
+/// prompt keeps indicators; every other prompt is a no-op.
+fn reclassify_prompt_line(state: &mut AppState) {
+    let Some(prompt) = state.prompt.as_mut() else { return; };
+    if (!matches!(prompt.action, PromptAction::Add)) { return; }
+    let index = prompt.cursor_line;
+    let Some(field) = prompt.lines.get(index) else { return; };
+    let indicator = classify_line(field.buffer());
+    if (prompt.indicators.len() < prompt.lines.len()) {
+        prompt.indicators.resize(prompt.lines.len(), LineIndicator::Empty);
+    }
+    prompt.indicators[index] = indicator;
+}
+
+#[cfg(test)]
+mod line_indicator_tests {
+    use super::{classify_line, LineIndicator};
+
+    #[test]
+    fn magnet_and_url_lines() {
+        assert_eq!(classify_line("magnet:?xt=urn:btih:abc"), LineIndicator::Magnet);
+        assert_eq!(classify_line("https://example.com/x.torrent"), LineIndicator::Url);
+    }
+
+    #[test]
+    fn blank_lines_are_empty() {
+        assert_eq!(classify_line(""), LineIndicator::Empty);
+        assert_eq!(classify_line("   "), LineIndicator::Empty);
+    }
+
+    #[test]
+    fn nonexistent_plain_path_is_not_found() {
+        // deliberate semantics: garbage that is neither magnet nor url is a
+        // local path that does not exist, exactly what resolve() would say
+        assert_eq!(
+            classify_line("/monsoon-test-does-not-exist/x.torrent"),
+            LineIndicator::NotFound
+        );
+    }
+
+    #[test]
+    fn zero_match_glob_reports_glob_zero() {
+        assert_eq!(
+            classify_line("/monsoon-test-does-not-exist/*.torrent"),
+            LineIndicator::Glob(0)
+        );
+    }
+
+    #[test]
+    fn existing_file_and_matching_glob() {
+        let dir = std::env::temp_dir()
+            .join(format!("monsoon-indicator-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.torrent");
+        std::fs::write(&file, b"x").unwrap();
+        assert_eq!(classify_line(file.to_str().unwrap()), LineIndicator::FileOk);
+        assert_eq!(
+            classify_line(&format!("{}/*.torrent", dir.display())),
+            LineIndicator::Glob(1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// modal prompt overlay that floats on top of the main view. captures all input
 /// until submitted (`enter`) or cancelled (`esc`).
 struct Prompt {
@@ -947,6 +1060,10 @@ struct Prompt {
     /// when true, shift+enter splits the line into two. on false (single-line
     /// prompts like rename/move) shift+enter is ignored.
     allow_multiline: bool,
+    /// per-line classification cache, parallel to `lines`. only the add
+    /// prompt fills this (empty vec elsewhere, drawing nothing); recomputed
+    /// per edited line, never on cursor movement between lines.
+    indicators: Vec<LineIndicator>,
 }
 
 impl Prompt {
@@ -1749,6 +1866,7 @@ fn build_torrent_rename_prompt(torrent_index: usize, current_name: String) -> Pr
         action: PromptAction::Rename,
         torrent_index,
         allow_multiline: false,
+        indicators: Vec::new(),
     }
 }
 
@@ -1767,6 +1885,7 @@ fn open_move_prompt(state: &mut AppState) {
         action: PromptAction::Move,
         torrent_index: index,
         allow_multiline: false,
+        indicators: Vec::new(),
     });
 }
 
@@ -1922,6 +2041,7 @@ fn build_rename_prompt(detail: &TorrentDetail, torrent_index: usize, row: &TreeR
             action: PromptAction::RenameFolder { old_prefix: row.full_path.clone() },
             torrent_index,
             allow_multiline: false,
+            indicators: Vec::new(),
         }
     } else {
         let file_index = row.file_index.unwrap_or(0);
@@ -1934,6 +2054,7 @@ fn build_rename_prompt(detail: &TorrentDetail, torrent_index: usize, row: &TreeR
             action: PromptAction::RenameFile { file_index, current_path: row.full_path.clone() },
             torrent_index,
             allow_multiline: false,
+            indicators: Vec::new(),
         }
     }
 }
@@ -2029,11 +2150,15 @@ fn open_rate_limit_prompt(state: &mut AppState) {
         action: PromptAction::SetRateLimit,
         torrent_index: index,
         allow_multiline: false,
+        indicators: Vec::new(),
     });
 }
 
 fn open_add_prompt(state: &mut AppState) {
     let prefill = clipboard_magnet_or_url().unwrap_or_default();
+    // classify the prefill up front so a clipboard magnet shows its
+    // indicator before the first keystroke
+    let indicators = vec![classify_line(&prefill)];
     state.prompt = Some(Prompt {
         title: "add torrent (shift+enter to add another line)".to_string(),
         helper: "magnet:, http(s)://, ftp(s)://, /abs/path, C:\\path, ~/foo.torrent, or a glob (*.torrent); one per line".to_string(),
@@ -2042,6 +2167,7 @@ fn open_add_prompt(state: &mut AppState) {
         action: PromptAction::Add,
         torrent_index: 0,
         allow_multiline: true,
+        indicators,
     });
 }
 
@@ -2094,6 +2220,7 @@ fn open_add_tracker_prompt(state: &mut AppState) {
         action: PromptAction::AddTracker,
         torrent_index: index,
         allow_multiline: false,
+        indicators: Vec::new(),
     });
 }
 
@@ -2762,6 +2889,10 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
                         .unwrap_or(CompletionSource::None);
                     let insert_at = prompt.cursor_line + 1;
                     prompt.lines.insert(insert_at, TextField::with_completion(String::new(), completion));
+                    // new line is empty, so Empty is its correct indicator
+                    if (insert_at <= prompt.indicators.len()) {
+                        prompt.indicators.insert(insert_at, LineIndicator::Empty);
+                    }
                     prompt.cursor_line = insert_at;
                 }
             }
@@ -2806,15 +2937,20 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
         }
         (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Backspace, KeyModifiers::ALT) => {
             if let Some(field) = current_prompt_field(state) { field.delete_word_backward(); }
+            reclassify_prompt_line(state);
         }
         (KeyCode::Delete, KeyModifiers::CONTROL) | (KeyCode::Delete, KeyModifiers::ALT) => {
             if let Some(field) = current_prompt_field(state) { field.delete_word_forward(); }
+            reclassify_prompt_line(state);
         }
         (KeyCode::Left, _) => { if let Some(field) = current_prompt_field(state) { field.move_left(); } }
         (KeyCode::Right, _) => { if let Some(field) = current_prompt_field(state) { field.move_right(); } }
         (KeyCode::Home, _) => { if let Some(field) = current_prompt_field(state) { field.move_home(); } }
         (KeyCode::End, _) => { if let Some(field) = current_prompt_field(state) { field.move_end(); } }
-        (KeyCode::Delete, _) => { if let Some(field) = current_prompt_field(state) { field.delete_forward(); } }
+        (KeyCode::Delete, _) => {
+            if let Some(field) = current_prompt_field(state) { field.delete_forward(); }
+            reclassify_prompt_line(state);
+        }
         (KeyCode::Backspace, _) => {
             if let Some(prompt) = state.prompt.as_mut() {
                 let cursor_line = prompt.cursor_line;
@@ -2823,6 +2959,9 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
                     .unwrap_or(true);
                 if (at_line_start && cursor_line > 0 && prompt.lines.len() > 1) {
                     prompt.lines.remove(cursor_line);
+                    if (cursor_line < prompt.indicators.len()) {
+                        prompt.indicators.remove(cursor_line);
+                    }
                     prompt.cursor_line = cursor_line - 1;
                     let end = prompt.lines[prompt.cursor_line].buffer().chars().count();
                     prompt.lines[prompt.cursor_line].set_cursor(end);
@@ -2830,14 +2969,19 @@ fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppStat
                     field.backspace();
                 }
             }
+            reclassify_prompt_line(state);
         }
         (KeyCode::Char('v'), KeyModifiers::CONTROL) => paste_into_prompt(state),
-        (KeyCode::Tab, _) => { if let Some(field) = current_prompt_field(state) { field.tab_complete(); } }
+        (KeyCode::Tab, _) => {
+            if let Some(field) = current_prompt_field(state) { field.tab_complete(); }
+            reclassify_prompt_line(state);
+        }
         (KeyCode::Char(character), modifiers)
             if !modifiers.contains(KeyModifiers::CONTROL)
                 && !modifiers.contains(KeyModifiers::ALT) =>
         {
             if let Some(field) = current_prompt_field(state) { field.insert_char(character); }
+            reclassify_prompt_line(state);
         }
         _ => {}
     }
@@ -2851,9 +2995,10 @@ fn current_prompt_field(state: &mut AppState) -> Option<&mut TextField> {
 }
 
 /// paste clipboard text into the focused prompt line. in a multi-line-capable
-/// prompt, embedded newlines split into new lines (so pasting a list of paths
-/// — one per line — populates the add-torrent prompt the way typing them
-/// would); in a single-line prompt, newlines are stripped by `TextField::paste`.
+/// prompt, embedded newlines split into new lines (so pasting a list of paths,
+/// one per line, populates the add-torrent prompt the way typing them would);
+/// in a single-line prompt, newlines are stripped by `TextField::paste`.
+/// every line the paste touched gets its indicator reclassified.
 fn paste_into_prompt(state: &mut AppState) {
     let Ok(mut clipboard) = arboard::Clipboard::new() else { return; };
     let Ok(text) = clipboard.get_text() else { return; };
@@ -2862,6 +3007,7 @@ fn paste_into_prompt(state: &mut AppState) {
         let completion = prompt.lines.get(prompt.cursor_line)
             .map(|field| field.completion_source())
             .unwrap_or(CompletionSource::None);
+        let first_line = prompt.cursor_line;
         let mut pieces: Vec<&str> = text.split('\n').collect();
         let first = pieces.remove(0);
         if let Some(field) = prompt.lines.get_mut(prompt.cursor_line) { field.paste(first); }
@@ -2869,12 +3015,22 @@ fn paste_into_prompt(state: &mut AppState) {
         for piece in pieces {
             let piece = piece.trim_end_matches('\r').to_string();
             prompt.lines.insert(insert_at, TextField::with_completion(piece, completion.clone()));
+            if (insert_at <= prompt.indicators.len()) {
+                prompt.indicators.insert(insert_at, LineIndicator::Empty);
+            }
             insert_at += 1;
         }
         prompt.cursor_line = insert_at - 1;
-    } else if let Some(field) = prompt.lines.get_mut(prompt.cursor_line) {
-        field.paste(&text);
+        if (matches!(prompt.action, PromptAction::Add)) {
+            for index in first_line..=prompt.cursor_line {
+                let indicator = classify_line(prompt.lines[index].buffer());
+                if (index < prompt.indicators.len()) { prompt.indicators[index] = indicator; }
+            }
+        }
+        return;
     }
+    if let Some(field) = prompt.lines.get_mut(prompt.cursor_line) { field.paste(&text); }
+    reclassify_prompt_line(state);
 }
 
 /// when the focused row in the content tab is a folder, toggle its collapsed
@@ -3389,6 +3545,7 @@ fn handle_feeds_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState
                 action: PromptAction::AddFeed,
                 torrent_index: 0,
                 allow_multiline: false,
+                indicators: Vec::new(),
             });
         }
         (KeyCode::Delete, _) | (KeyCode::Char('x'), KeyModifiers::NONE) => {
@@ -4207,6 +4364,14 @@ fn draw_prompt(frame: &mut ratatui::Frame, state: &AppState) {
             spans.extend(render_field_with_cursor(field));
         } else {
             spans.push(Span::raw(field.buffer().to_string()));
+        }
+        // per-line validity suffix, e.g. "  [glob: 4 matches]". empty vec
+        // on non-add prompts means .get() misses and nothing is drawn.
+        if let Some((label, color)) = prompt.indicators.get(index).and_then(LineIndicator::label) {
+            spans.push(Span::styled(
+                format!("  [{}]", label),
+                Style::default().fg(color).add_modifier(Modifier::DIM),
+            ));
         }
         Line::from(spans)
     }).collect();
