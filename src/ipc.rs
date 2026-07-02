@@ -189,11 +189,11 @@ pub enum Request {
     Shutdown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum UntrackedChoice { Move, Leave }
-
-impl Default for UntrackedChoice {
-    fn default() -> Self { UntrackedChoice::Leave }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UntrackedChoice {
+    Move,
+    #[default]
+    Leave,
 }
 
 /// the user's resolved answers for a rename/move that needed confirmation.
@@ -215,16 +215,13 @@ pub enum RenameConcern {
 
 /// whether to wrap a torrent's content in a folder named after the torrent.
 /// `Default` resolves to the `default_content_layout` config setting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContentLayout {
+    #[default]
     Default,
     Always,
     Never,
     IfMultiple,
-}
-
-impl Default for ContentLayout {
-    fn default() -> Self { ContentLayout::Default }
 }
 
 impl ContentLayout {
