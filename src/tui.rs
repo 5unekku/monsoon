@@ -1188,6 +1188,20 @@ struct AddOptionsForm {
     edit_buffer: Option<TextField>,
 }
 
+/// one dispatched add and how it went. `source` is the uri/path exactly as
+/// dispatched, post glob expansion.
+struct AddResultEntry {
+    source: String,
+    outcome: Result<(), String>,
+}
+
+/// post-dispatch review overlay. entries stay in dispatch order, which
+/// equals add order plus glob-expansion order by construction.
+struct AddResultsReview {
+    entries: Vec<AddResultEntry>,
+    focused: usize,
+}
+
 /// post-add file priority configuration step. appears after adding paused
 /// torrents so the user can cherry-pick files before any data downloads.
 /// one torrent at a time; tab/enter advances, esc skips.
@@ -1275,6 +1289,13 @@ struct AppState {
     add_options: Option<AddOptionsForm>,
     /// post-add file priority step. opened when torrents are added paused.
     priority_step: Option<Box<PriorityStep>>,
+    /// per-entry results overlay shown after dispatching adds. None when
+    /// dismissed or when add_result_review is "never".
+    add_results: Option<AddResultsReview>,
+    /// mirror of config's add_result_review ("always" | "never"). read once
+    /// at startup, flipped in memory when ctrl+d persists "never" so the
+    /// very next add this session already skips the overlay.
+    add_result_review: String,
     /// inline text field active in the main view. when Some, the main-view
     /// key handler is bypassed and every printable keystroke goes into the
     /// buffer. see [TextInput] for the rationale.
@@ -1368,7 +1389,7 @@ impl AppState {
 
         // load [tui] defaults from config.toml. failure here is non-fatal —
         // worst case the user sees built-in defaults until they fix the file.
-        let (show_sidebar, show_detail, configured_columns, nerd_font, configured_widths) =
+        let (show_sidebar, show_detail, configured_columns, nerd_font, configured_widths, add_result_review) =
             Config::load()
                 .map(|config| (
                     config.tui_show_sidebar,
@@ -1376,8 +1397,16 @@ impl AppState {
                     config.tui_columns,
                     config.tui_nerd_font,
                     config.tui_column_widths,
+                    config.add_result_review,
                 ))
-                .unwrap_or((false, false, Vec::new(), false, std::collections::BTreeMap::new()));
+                .unwrap_or((
+                    false,
+                    false,
+                    Vec::new(),
+                    false,
+                    std::collections::BTreeMap::new(),
+                    "always".to_string(),
+                ));
 
         // truecolor probe — most modern terminals export COLORTERM=truecolor.
         // we don't use the result much (ratatui maps to whatever the terminal
@@ -1405,6 +1434,8 @@ impl AppState {
             rename_confirm: None,
             add_options: None,
             priority_step: None,
+            add_results: None,
+            add_result_review,
             active_input: None,
             name_filter: String::new(),
             content_filter: String::new(),
@@ -1673,6 +1704,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
                         false
                     } else if (state.prompt.is_some()) {
                         handle_prompt_key(key.code, key.modifiers, &mut state)
+                    } else if (state.add_results.is_some()) {
+                        handle_add_results_key(key.code, key.modifiers, &mut state)
                     } else if (state.priority_step.is_some()) {
                         handle_priority_step_key(key.code, key.modifiers, &mut state)
                     } else if (state.show_help) {
@@ -2809,6 +2842,7 @@ fn advance_add_options(state: &mut AppState) {
 fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
     let mut succeeded: usize = 0;
     let mut failures: Vec<String> = Vec::new();
+    let mut results: Vec<AddResultEntry> = Vec::new();
     let mut organize_indices: Vec<usize> = Vec::new();
     let mut organize_entries: Vec<String> = Vec::new();
     let mut organize_resume: Vec<bool> = Vec::new();
@@ -2827,11 +2861,24 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
             content_layout: options.content_layout,
         }) {
             Ok(Response::Added { id }) => Some(id),
-            Ok(Response::Err(message)) => { failures.push(format!("{}: {}", uri, message)); None }
-            Ok(_) => { failures.push(format!("{}: unexpected response", uri)); None }
-            Err(error) => { failures.push(format!("{}: {}", uri, error)); None }
+            Ok(Response::Err(message)) => {
+                failures.push(format!("{}: {}", uri, message));
+                results.push(AddResultEntry { source: uri.clone(), outcome: Err(message) });
+                None
+            }
+            Ok(_) => {
+                failures.push(format!("{}: unexpected response", uri));
+                results.push(AddResultEntry { source: uri.clone(), outcome: Err("unexpected response".to_string()) });
+                None
+            }
+            Err(error) => {
+                failures.push(format!("{}: {}", uri, error));
+                results.push(AddResultEntry { source: uri.clone(), outcome: Err(error.to_string()) });
+                None
+            }
         };
         if (added_id.is_none()) { continue; }
+        results.push(AddResultEntry { source: uri.clone(), outcome: Ok(()) });
         succeeded += 1;
         let new_index = match client::send(Request::List) {
             Ok(Response::TorrentList(list)) => list.len().saturating_sub(1),
@@ -2847,6 +2894,8 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         organize_entries.push(uri.clone());
         organize_resume.push(options.start);
     }
+    // one-line summary stays in both modes: it is the status line and it
+    // keeps the status bar meaningful after the overlay closes
     if (failures.is_empty()) {
         state.error = Some(format!("added {} torrent(s)", succeeded));
     } else if (succeeded == 0) {
@@ -2858,9 +2907,54 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
         ));
     }
     state.last_poll = Instant::now() - POLL_INTERVAL;
+    // per-entry review overlay, unless the user opted out permanently. the
+    // organize step is created in the same call; the overlay outranks it in
+    // the input ladder, so review happens first and dismissing reveals the
+    // step already queued underneath.
+    if (state.add_result_review != "never" && !results.is_empty()) {
+        state.add_results = Some(AddResultsReview { entries: results, focused: 0 });
+    }
     if (!organize_indices.is_empty()) {
         state.priority_step = Some(Box::new(PriorityStep::new(organize_entries, organize_indices, organize_resume)));
     }
+}
+
+/// key handler for the add-results review overlay. returns true to quit.
+fn handle_add_results_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
+    let Some(review) = state.add_results.as_mut() else { return false; };
+    match (code, modifiers) {
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) => return true,
+        // ctrl+d: dismiss all, close, and persist the opt-out. flipping the
+        // in-memory mirror makes the very next add this session skip the
+        // overlay too. re-enabling is a config.toml edit, symmetric with
+        // how rename_merge_same = "always" is undone.
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            state.add_results = None;
+            state.add_result_review = "never".to_string();
+            let _ = submit_set("add_result_review", "never");
+        }
+        // shift+d and esc: dismiss all, close (esc exits every modal in the app)
+        (KeyCode::Char('D'), _) | (KeyCode::Esc, _) => {
+            state.add_results = None;
+        }
+        // enter/d: dismiss the focused entry; removing the last one closes
+        (KeyCode::Enter, _) | (KeyCode::Char('d'), KeyModifiers::NONE) => {
+            review.entries.remove(review.focused);
+            if (review.entries.is_empty()) {
+                state.add_results = None;
+            } else if (review.focused >= review.entries.len()) {
+                review.focused = review.entries.len() - 1;
+            }
+        }
+        (KeyCode::Char('s'), KeyModifiers::NONE) | (KeyCode::Down, _) => {
+            if (review.focused + 1 < review.entries.len()) { review.focused += 1; }
+        }
+        (KeyCode::Char('w'), KeyModifiers::NONE) | (KeyCode::Up, _) => {
+            review.focused = review.focused.saturating_sub(1);
+        }
+        _ => {}
+    }
+    false
 }
 
 fn handle_prompt_key(code: KeyCode, modifiers: KeyModifiers, state: &mut AppState) -> bool {
@@ -3882,6 +3976,11 @@ fn tab_complete_content_filter(state: &mut AppState) {
 fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
     if (state.priority_step.is_some()) {
         draw_priority_step(frame, state);
+        // review overlay outranks the organize step in the input ladder,
+        // so it also renders on top of it
+        if (state.add_results.is_some()) {
+            draw_add_results(frame, state);
+        }
         // renames opened from inside the step use the shared prompt overlay
         if (state.prompt.is_some()) {
             draw_prompt(frame, state);
@@ -3897,6 +3996,9 @@ fn draw(frame: &mut ratatui::Frame, state: &mut AppState) {
         draw_feeds(frame, state);
     } else {
         draw_main(frame, state);
+    }
+    if (state.add_results.is_some()) {
+        draw_add_results(frame, state);
     }
     if (state.prompt.is_some()) {
         draw_prompt(frame, state);
@@ -4445,6 +4547,123 @@ fn draw_recent_paths_picker(frame: &mut ratatui::Frame, state: &AppState) {
         Line::from(Span::styled(format!(" {} ", path), style))
     }).collect();
     frame.render_widget(Paragraph::new(lines), layout[1]);
+}
+
+/// truncate `text` to `max_chars` by cutting the middle and inserting an
+/// ellipsis, keeping head and tail visible (paths differ at both ends).
+fn middle_truncate(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if (count <= max_chars) { return text.to_string(); }
+    if (max_chars <= 1) { return "…".to_string(); }
+    let keep = max_chars - 1;
+    let head_length = keep - keep / 2;
+    let tail_length = keep / 2;
+    let head: String = text.chars().take(head_length).collect();
+    let tail: String = text.chars().skip(count - tail_length).collect();
+    format!("{}…{}", head, tail)
+}
+
+fn draw_add_results(frame: &mut ratatui::Frame, state: &AppState) {
+    let Some(review) = &state.add_results else { return; };
+    let area = frame.area();
+    let height = ((review.entries.len() as u16) + 4).clamp(6, area.height.saturating_sub(2));
+    let width = (area.width * 70 / 100).clamp(50, area.width.saturating_sub(4));
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let modal = Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(" add results ");
+    let inner = block.inner(modal);
+    frame.render_widget(block, modal);
+
+    let layout = Layout::vertical([
+        Constraint::Min(1),    // entry rows
+        Constraint::Length(1), // hint
+    ])
+    .split(inner);
+
+    // scroll window that keeps the focused row visible
+    let visible = layout[0].height as usize;
+    let first = if (visible == 0 || review.focused < visible) { 0 } else { review.focused + 1 - visible };
+    let rows: Vec<Line> = review.entries.iter().enumerate()
+        .skip(first)
+        .take(visible.max(1))
+        .map(|(index, entry)| {
+            let marker = if (index == review.focused) { "› " } else { "  " };
+            let (verdict, verdict_color) = match &entry.outcome {
+                Ok(()) => ("ok  ", Color::Green),
+                Err(_) => ("fail", Color::Red),
+            };
+            let reason = match &entry.outcome {
+                Ok(()) => String::new(),
+                Err(message) => format!("  {}", message),
+            };
+            let source_budget = (layout[0].width as usize)
+                .saturating_sub(2 + 5 + reason.chars().count())
+                .max(8);
+            let mut spans = vec![
+                Span::styled(marker, Style::default().fg(Color::Yellow)),
+                Span::styled(verdict, Style::default().fg(verdict_color)),
+                Span::raw(" "),
+                Span::raw(middle_truncate(&entry.source, source_budget)),
+            ];
+            if (!reason.is_empty()) {
+                spans.push(Span::styled(reason, Style::default().fg(Color::Red)));
+            }
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(rows), layout[0]);
+
+    let hint = Line::from(vec![
+        Span::styled(" w/s ", Style::default().fg(Color::Yellow)),
+        Span::raw("move  "),
+        Span::styled("enter/d ", Style::default().fg(Color::Yellow)),
+        Span::raw("dismiss  "),
+        Span::styled("shift+d ", Style::default().fg(Color::Yellow)),
+        Span::raw("dismiss all  "),
+        Span::styled("ctrl+d ", Style::default().fg(Color::Yellow)),
+        Span::raw("never show again  "),
+        Span::styled("esc ", Style::default().fg(Color::Yellow)),
+        Span::raw("close"),
+    ]);
+    frame.render_widget(
+        Paragraph::new(hint).style(Style::default().fg(Color::Gray)),
+        layout[1],
+    );
+}
+
+#[cfg(test)]
+mod middle_truncate_tests {
+    use super::middle_truncate;
+
+    #[test]
+    fn short_text_passes_through() {
+        assert_eq!(middle_truncate("abc", 10), "abc");
+        assert_eq!(middle_truncate("abcdefghij", 10), "abcdefghij");
+    }
+
+    #[test]
+    fn long_text_keeps_head_and_tail() {
+        assert_eq!(middle_truncate("abcdefghijk", 7), "abc…ijk");
+    }
+
+    #[test]
+    fn tiny_budget_degrades_to_ellipsis() {
+        assert_eq!(middle_truncate("abcdef", 1), "…");
+        assert_eq!(middle_truncate("abcdef", 0), "…");
+    }
+
+    #[test]
+    fn unicode_counts_chars_not_bytes() {
+        assert_eq!(middle_truncate("日本語テスト表示", 5), "日本…表示");
+    }
 }
 
 fn draw_rename_confirm(frame: &mut ratatui::Frame, state: &AppState) {
