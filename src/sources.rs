@@ -67,37 +67,67 @@ pub enum Source {
     File(PathBuf),
 }
 
-/// classify and resolve one user input string into a Source. on http/ftp
-/// the file is downloaded to a temp path; the caller owns cleanup.
-pub fn resolve(input: &str) -> Result<Source> {
+/// what one input line will be treated as. shared by the tui's live
+/// indicator, the tui's submit-time expansion, and the daemon's resolve(),
+/// so all three always agree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceKind {
+    /// magnet uri, passed through untouched
+    Magnet,
+    /// http/https/ftp/sftp, fetched daemon-side via libcurl
+    Url,
+    /// tilde-expanded, normalised local path (may or may not exist)
+    LocalPath(PathBuf),
+    /// tilde-expanded pattern containing glob metacharacters
+    LocalGlob(String),
+}
+
+/// classify one input line the same way resolve() will treat it. returns
+/// None for empty (after trim) input. the literal-path-exists check runs
+/// before glob detection so bracket-laden real filenames ("[Group] Show")
+/// are never reinterpreted as character classes.
+pub fn classify(input: &str) -> Option<SourceKind> {
     let trimmed = input.trim();
-    if (trimmed.is_empty()) {
-        anyhow::bail!("empty source");
-    }
-
-    // magnet uris are the simplest case
-    if (trimmed.starts_with("magnet:")) {
-        return Ok(Source::Magnet(trimmed.to_string()));
-    }
-
-    // network protocols — fetch via libcurl (http/https/ftp/sftp).
-    if (is_url(trimmed)) {
-        let temp = std::env::temp_dir().join(format!(
-            "monsoon-fetch-{}.torrent",
-            std::process::id()
-        ));
-        fetch_url(&temp, trimmed)
-            .inspect_err(|_| { let _ = std::fs::remove_file(&temp); })?;
-        return Ok(Source::File(temp));
-    }
-
-    // otherwise treat as a local path. expand ~ first.
-    let expanded = expand_tilde(trimmed)?;
+    if (trimmed.is_empty()) { return None; }
+    if (trimmed.starts_with("magnet:")) { return Some(SourceKind::Magnet); }
+    if (is_url(trimmed)) { return Some(SourceKind::Url); }
+    // tilde expansion failure (no resolvable home dir) falls back to the raw
+    // input; the path simply won't exist and surfaces as not-found
+    let expanded = expand_tilde(trimmed).unwrap_or_else(|_| trimmed.to_string());
     let path = normalise_path(&expanded);
-    if (!path.exists()) {
-        anyhow::bail!("file not found: {}", path.display());
+    if (path.exists()) { return Some(SourceKind::LocalPath(path)); }
+    if (expanded.chars().any(|character| matches!(character, '*' | '?' | '['))) {
+        return Some(SourceKind::LocalGlob(expanded));
     }
-    Ok(Source::File(path))
+    Some(SourceKind::LocalPath(path))
+}
+
+/// classify and resolve one user input string into a Source. on http/ftp
+/// the file is downloaded to a temp path; the caller owns cleanup. glob
+/// patterns are the client's job to expand and are rejected here.
+pub fn resolve(input: &str) -> Result<Source> {
+    match classify(input) {
+        None => anyhow::bail!("empty source"),
+        Some(SourceKind::Magnet) => Ok(Source::Magnet(input.trim().to_string())),
+        Some(SourceKind::Url) => {
+            let temp = std::env::temp_dir().join(format!(
+                "monsoon-fetch-{}.torrent",
+                std::process::id()
+            ));
+            fetch_url(&temp, input.trim())
+                .inspect_err(|_| { let _ = std::fs::remove_file(&temp); })?;
+            Ok(Source::File(temp))
+        }
+        Some(SourceKind::LocalPath(path)) => {
+            if (!path.exists()) {
+                anyhow::bail!("file not found: {}", path.display());
+            }
+            Ok(Source::File(path))
+        }
+        Some(SourceKind::LocalGlob(_)) => {
+            anyhow::bail!("glob patterns must be expanded by the client")
+        }
+    }
 }
 
 fn is_url(input: &str) -> bool {
@@ -223,4 +253,105 @@ pub fn fetch_url(dest: &std::path::Path, url: &str) -> Result<()> {
         transfer.perform().map_err(|error| anyhow::anyhow!("curl: {}", error))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{classify, SourceKind};
+    use std::path::PathBuf;
+
+    /// tiny scoped tempdir, removed on drop. avoids a tempfile dev-dependency
+    /// for what a ten-line Drop impl covers.
+    pub struct TestDir(pub PathBuf);
+
+    impl TestDir {
+        pub fn new(label: &str) -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("monsoon-sources-test-{}-{}", label, std::process::id()));
+            let _ = std::fs::remove_dir_all(&path);
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        pub fn file(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            if let Some(parent) = path.parent() { std::fs::create_dir_all(parent).unwrap(); }
+            std::fs::write(&path, b"x").unwrap();
+            path
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    #[test]
+    fn empty_and_whitespace_classify_as_none() {
+        assert_eq!(classify(""), None);
+        assert_eq!(classify("   "), None);
+    }
+
+    #[test]
+    fn magnet_uris_classify_as_magnet() {
+        assert_eq!(classify("magnet:?xt=urn:btih:abcdef"), Some(SourceKind::Magnet));
+    }
+
+    #[test]
+    fn each_url_scheme_classifies_as_url_case_insensitively() {
+        for input in [
+            "http://example.com/a.torrent",
+            "https://example.com/a.torrent",
+            "ftp://example.com/a.torrent",
+            "sftp://example.com/a.torrent",
+            "HTTPS://EXAMPLE.COM/A.TORRENT",
+        ] {
+            assert_eq!(classify(input), Some(SourceKind::Url), "input: {}", input);
+        }
+    }
+
+    #[test]
+    fn tilde_paths_expand_to_home() {
+        match classify("~/monsoon-classify-test.torrent") {
+            Some(SourceKind::LocalPath(path)) => {
+                assert!(
+                    !path.to_string_lossy().starts_with('~'),
+                    "tilde not expanded: {}",
+                    path.display()
+                );
+            }
+            other => panic!("expected LocalPath, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn windows_drive_paths_classify_as_local_path_with_folded_drive_letter() {
+        match classify(r"c:\downloads\a.torrent") {
+            Some(SourceKind::LocalPath(path)) => {
+                assert!(path.to_string_lossy().starts_with('C'));
+            }
+            other => panic!("expected LocalPath, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn existing_literal_path_with_brackets_beats_glob_interpretation() {
+        let dir = TestDir::new("brackets");
+        let real = dir.file("[Group] Show.torrent");
+        assert_eq!(
+            classify(real.to_str().unwrap()),
+            Some(SourceKind::LocalPath(real.clone()))
+        );
+    }
+
+    #[test]
+    fn nonexistent_path_with_metacharacters_classifies_as_glob() {
+        let pattern = "/monsoon-does-not-exist/*.torrent";
+        assert_eq!(classify(pattern), Some(SourceKind::LocalGlob(pattern.to_string())));
+    }
+
+    #[test]
+    fn nonexistent_plain_path_stays_local_path() {
+        let path = "/monsoon-does-not-exist/a.torrent";
+        assert_eq!(classify(path), Some(SourceKind::LocalPath(PathBuf::from(path))));
+    }
 }
