@@ -570,8 +570,7 @@ mod tests {
 
     #[test]
     fn fetch_auth_from_config_maps_the_netrc_flag() {
-        let mut config = crate::config::Config::default();
-        config.use_netrc = false;
+        let mut config = crate::config::Config { use_netrc: false, ..Default::default() };
         assert!(!FetchAuth::from_config(&config).use_netrc);
         config.use_netrc = true;
         let auth = FetchAuth::from_config(&config);
