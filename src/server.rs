@@ -599,6 +599,7 @@ impl App {
     pub fn poll_rss_feeds(&mut self) {
         let now = Instant::now();
         let feeds = self.rss_feeds.feeds.clone();
+        let fetch_auth = crate::sources::FetchAuth::from_config(&self.config);
         for feed in &feeds {
             let interval = Duration::from_secs(feed.poll_interval_minutes * 60);
             let due = self.rss_last_polled.get(&feed.url)
@@ -607,7 +608,7 @@ impl App {
             if (!due) { continue; }
             self.rss_last_polled.insert(feed.url.clone(), now);
 
-            let items = match crate::rss::poll_feed(feed, &self.rss_seen) {
+            let items = match crate::rss::poll_feed(feed, &self.rss_seen, &fetch_auth) {
                 Ok(items) => items,
                 Err(error) => {
                     tracing::warn!(url = %feed.url, "rss poll failed: {}", error);
@@ -617,7 +618,7 @@ impl App {
 
             let mut added = 0usize;
             for (key, uri) in items {
-                let result = match crate::sources::resolve(&uri) {
+                let result = match crate::sources::resolve(&uri, &fetch_auth) {
                     Ok(crate::sources::Source::Magnet(magnet)) => {
                         self.add_magnet(&magnet, feed.save_path.as_deref(), feed.category.as_deref(), feed.start_paused, crate::ipc::ContentLayout::Default)
                     }
@@ -1032,7 +1033,8 @@ impl App {
         // the previous on-disk copy so a transient outage doesn't drop the filter.
         let url = self.config.ip_filter_url.clone();
         if (!url.trim().is_empty()) {
-            if let Err(error) = refresh_ip_filter(&url, &path) {
+            let fetch_auth = crate::sources::FetchAuth::from_config(&self.config);
+            if let Err(error) = refresh_ip_filter(&url, &path, &fetch_auth) {
                 tracing::warn!(url = %url, "ip filter refresh failed: {}", error);
             } else {
                 tracing::info!(url = %url, path = %path, "ip filter refreshed");
@@ -1232,10 +1234,15 @@ impl App {
                     }
                 }
             }
-            Request::Add { uri, save_path, category, start_paused, content_layout, credentials: _ } => {
+            Request::Add { uri, save_path, category, start_paused, content_layout, credentials } => {
                 // delegate scheme + path resolution to the sources module so
                 // http/https/ftp/sftp urls and ~ expansion work uniformly.
-                let result = match crate::sources::resolve(&uri) {
+                // credentials are used for this one transfer and dropped.
+                let fetch_auth = crate::sources::FetchAuth {
+                    credentials,
+                    use_netrc: self.config.use_netrc,
+                };
+                let result = match crate::sources::resolve(&uri, &fetch_auth) {
                     Ok(crate::sources::Source::Magnet(magnet)) => {
                         self.add_magnet(&magnet, save_path.as_deref(), category.as_deref(), start_paused, content_layout)
                     }
@@ -1778,13 +1785,13 @@ fn handle_network_connection(app: &mut App, mut authed: network::AuthedConnectio
 /// fetch an ip-filter blocklist into `target`. downloads to a `.partial` temp
 /// file first and atomically renames on success so a partial fetch can't
 /// corrupt the live filter.
-fn refresh_ip_filter(url: &str, target: &str) -> Result<()> {
+fn refresh_ip_filter(url: &str, target: &str, fetch_auth: &crate::sources::FetchAuth) -> Result<()> {
     let temp_path = format!("{}.partial", target);
     let temp = std::path::Path::new(&temp_path);
     if let Some(parent) = std::path::Path::new(target).parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    crate::sources::fetch_url(temp, url)
+    crate::sources::fetch_url(temp, url, fetch_auth)
         .inspect_err(|_| { let _ = std::fs::remove_file(temp); })?;
     std::fs::rename(temp, target).context("swap ip filter into place")?;
     Ok(())

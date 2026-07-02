@@ -75,8 +75,8 @@ impl RssSeen {
 /// fetch and parse one feed. returns `(seen_key, uri)` pairs for items that
 /// are new (not in `seen`) and whose title matches the filter regex.
 /// uri is either a magnet URI or a .torrent download URL.
-pub fn poll_feed(feed: &RssFeed, seen: &RssSeen) -> Result<Vec<(String, String)>> {
-    let xml = crate::sources::fetch_to_string(&feed.url)
+pub fn poll_feed(feed: &RssFeed, seen: &RssSeen, fetch_auth: &crate::sources::FetchAuth) -> Result<Vec<(String, String)>> {
+    let xml = crate::sources::fetch_to_string(&feed.url, fetch_auth)
         .with_context(|| format!("fetch feed {}", feed.url))?;
 
     let filter = if (feed.filter.trim().is_empty()) {

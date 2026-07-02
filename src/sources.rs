@@ -67,6 +67,123 @@ pub enum Source {
     File(PathBuf),
 }
 
+/// everything a fetch needs to authenticate. built by the caller from
+/// config plus any per-transfer credentials from the ipc request.
+pub struct FetchAuth {
+    /// one-shot username/password from the ipc request. None on every
+    /// non-interactive path (rss, watch dirs, ip filter, cli).
+    pub credentials: Option<crate::ipc::TransferCredentials>,
+    /// map ~/.netrc entries onto fetches (curl NetRc::Optional). explicit
+    /// credentials above always win, which is curl's documented Optional
+    /// behavior.
+    pub use_netrc: bool,
+}
+
+impl FetchAuth {
+    /// config-only auth: what every non-interactive fetch path uses.
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self { credentials: None, use_netrc: config.use_netrc }
+    }
+}
+
+/// fetch failed because the server wants credentials. the add handler
+/// downcasts to this to emit Response::AuthRequired instead of a plain Err.
+#[derive(Debug)]
+pub struct AuthRequiredError {
+    /// literal url scheme, lowercase: "http", "https", "ftp", "sftp"
+    pub scheme: String,
+    /// human text, e.g. "http 401 unauthorized", "login denied"
+    pub hint: String,
+}
+
+impl std::fmt::Display for AuthRequiredError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "authentication required ({})", self.hint)
+    }
+}
+
+impl std::error::Error for AuthRequiredError {}
+
+/// true when the system libcurl was built with sftp support (libssh2).
+/// probed once per process; the daemon logs the result at startup so a
+/// missing backend is visible before anyone tries an sftp url.
+pub fn sftp_supported() -> bool {
+    static SFTP_SUPPORTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SFTP_SUPPORTED.get_or_init(|| {
+        curl::Version::get().protocols().any(|protocol| protocol == "sftp")
+    })
+}
+
+/// literal lowercase scheme of a url ("http", "ftp", ...). inputs without
+/// "://" come back whole; callers only pass strings that passed is_url.
+fn url_scheme(url: &str) -> String {
+    url.split("://").next().unwrap_or("").to_ascii_lowercase()
+}
+
+/// decide whether a failed transfer should surface as "server wants
+/// credentials". curl_code is the raw CURLE_* value (0 when the transfer
+/// nominally succeeded), http_status is response_code() (0 when unknown).
+fn auth_failure_hint(scheme: &str, curl_code: u32, http_status: u32) -> Option<String> {
+    match scheme {
+        // 401 is the only http status where credentials plausibly help
+        // (403/407/5xx stay plain errors). checked on the error path AND
+        // after a "successful" perform, because fail_on_error is documented
+        // to let 401 slip through once http auth is engaged.
+        "http" | "https" if (http_status == 401) => Some("http 401 unauthorized".to_string()),
+        // 67 = CURLE_LOGIN_DENIED, kept as a literal so we don't import
+        // curl-sys for one constant. covers ftp login rejections and
+        // libssh2 auth failures alike.
+        "ftp" | "sftp" if (curl_code == 67) => Some("login denied".to_string()),
+        _ => None,
+    }
+}
+
+/// apply credentials and the netrc policy to a curl handle.
+fn apply_auth(easy: &mut curl::easy::Easy, scheme: &str, auth: &FetchAuth) -> Result<()> {
+    use curl::easy::{Auth, NetRc};
+    let netrc_mode = if (auth.use_netrc) { NetRc::Optional } else { NetRc::Ignored };
+    easy.netrc(netrc_mode).map_err(|error| anyhow::anyhow!("curl netrc: {}", error))?;
+    if let Some(credentials) = &auth.credentials {
+        easy.username(&credentials.username)
+            .map_err(|error| anyhow::anyhow!("curl username: {}", error))?;
+        easy.password(&credentials.password)
+            .map_err(|error| anyhow::anyhow!("curl password: {}", error))?;
+        // basic + digest so curl negotiates whichever the server offers;
+        // never volunteered without credentials. ftp uses username/password
+        // as the login; sftp maps them to ssh password and
+        // keyboard-interactive auth natively (no ui takeover needed).
+        if (scheme == "http" || scheme == "https") {
+            easy.http_auth(Auth::new().basic(true).digest(true))
+                .map_err(|error| anyhow::anyhow!("curl http_auth: {}", error))?;
+        }
+    }
+    Ok(())
+}
+
+/// shared post-perform classification for both fetch functions. takes the
+/// handle mutably because Easy::response_code does.
+fn finish_fetch(
+    easy: &mut curl::easy::Easy,
+    scheme: &str,
+    perform_result: std::result::Result<(), curl::Error>,
+) -> Result<()> {
+    let http_status = easy.response_code().unwrap_or(0);
+    match perform_result {
+        Err(error) => {
+            if let Some(hint) = auth_failure_hint(scheme, error.code() as u32, http_status) {
+                return Err(AuthRequiredError { scheme: scheme.to_string(), hint }.into());
+            }
+            Err(anyhow::anyhow!("curl: {}", error))
+        }
+        Ok(()) => {
+            if let Some(hint) = auth_failure_hint(scheme, 0, http_status) {
+                return Err(AuthRequiredError { scheme: scheme.to_string(), hint }.into());
+            }
+            Ok(())
+        }
+    }
+}
+
 /// what one input line will be treated as. shared by the tui's live
 /// indicator, the tui's submit-time expansion, and the daemon's resolve(),
 /// so all three always agree.
@@ -116,16 +233,21 @@ pub fn expand_glob(pattern: &str) -> Result<Vec<PathBuf>, String> {
 /// classify and resolve one user input string into a Source. on http/ftp
 /// the file is downloaded to a temp path; the caller owns cleanup. glob
 /// patterns are the client's job to expand and are rejected here.
-pub fn resolve(input: &str) -> Result<Source> {
+pub fn resolve(input: &str, auth: &FetchAuth) -> Result<Source> {
     match classify(input) {
         None => anyhow::bail!("empty source"),
         Some(SourceKind::Magnet) => Ok(Source::Magnet(input.trim().to_string())),
         Some(SourceKind::Url) => {
+            // sftp needs the libssh2-backed protocol in the system libcurl.
+            // a missing backend is one clear error, never an auth prompt.
+            if (input.trim().to_ascii_lowercase().starts_with("sftp://") && !sftp_supported()) {
+                anyhow::bail!("sftp support requires libcurl built with libssh2; this system's libcurl does not provide it");
+            }
             let temp = std::env::temp_dir().join(format!(
                 "monsoon-fetch-{}.torrent",
                 std::process::id()
             ));
-            fetch_url(&temp, input.trim())
+            fetch_url(&temp, input.trim(), auth)
                 .inspect_err(|_| { let _ = std::fs::remove_file(&temp); })?;
             Ok(Source::File(temp))
         }
@@ -218,10 +340,12 @@ fn normalise_path(input: &str) -> PathBuf {
 
 /// fetch a url into memory and return the body as a String. follows redirects,
 /// enforces a 60s timeout. intended for small text payloads (RSS feeds, etc.).
-pub fn fetch_to_string(url: &str) -> Result<String> {
+/// auth failures surface as AuthRequiredError so callers log a clear message.
+pub fn fetch_to_string(url: &str, auth: &FetchAuth) -> Result<String> {
     use curl::easy::Easy;
     use std::time::Duration;
     let mut body: Vec<u8> = Vec::new();
+    let scheme = url_scheme(url);
     let mut easy = Easy::new();
     easy.url(url).map_err(|e| anyhow::anyhow!("curl url: {}", e))?;
     easy.follow_location(true).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -229,24 +353,29 @@ pub fn fetch_to_string(url: &str) -> Result<String> {
     easy.connect_timeout(Duration::from_secs(30)).map_err(|e| anyhow::anyhow!("{}", e))?;
     easy.timeout(Duration::from_secs(60)).map_err(|e| anyhow::anyhow!("{}", e))?;
     easy.fail_on_error(true).map_err(|e| anyhow::anyhow!("{}", e))?;
-    {
+    apply_auth(&mut easy, &scheme, auth)?;
+    let perform_result = {
         let mut transfer = easy.transfer();
         transfer.write_function(|data| { body.extend_from_slice(data); Ok(data.len()) })
             .map_err(|e| anyhow::anyhow!("curl write: {}", e))?;
-        transfer.perform().map_err(|e| anyhow::anyhow!("curl: {}", e))?;
-    }
+        transfer.perform()
+    };
+    finish_fetch(&mut easy, &scheme, perform_result)?;
     String::from_utf8(body).map_err(|_| anyhow::anyhow!("response is not valid utf-8"))
 }
 
 /// download a url to a local file via libcurl. follows redirects, enforces a
 /// 120s timeout, and fails with a structured error on non-2xx responses.
 /// supports http, https, ftp, and sftp (same protocols curl supports).
-pub fn fetch_url(dest: &std::path::Path, url: &str) -> Result<()> {
+/// auth failures surface as AuthRequiredError so interactive callers can
+/// prompt for credentials.
+pub fn fetch_url(dest: &std::path::Path, url: &str, auth: &FetchAuth) -> Result<()> {
     use curl::easy::Easy;
     use std::time::Duration;
     let file = std::fs::File::create(dest)
         .map_err(|error| anyhow::anyhow!("create temp file: {}", error))?;
     let mut file = std::io::BufWriter::new(file);
+    let scheme = url_scheme(url);
     let mut easy = Easy::new();
     easy.url(url).map_err(|error| anyhow::anyhow!("curl url: {}", error))?;
     easy.follow_location(true).map_err(|error| anyhow::anyhow!("curl follow_location: {}", error))?;
@@ -254,21 +383,22 @@ pub fn fetch_url(dest: &std::path::Path, url: &str) -> Result<()> {
     easy.connect_timeout(Duration::from_secs(30)).map_err(|error| anyhow::anyhow!("curl connect_timeout: {}", error))?;
     easy.timeout(Duration::from_secs(120)).map_err(|error| anyhow::anyhow!("curl timeout: {}", error))?;
     easy.fail_on_error(true).map_err(|error| anyhow::anyhow!("curl fail_on_error: {}", error))?;
-    {
+    apply_auth(&mut easy, &scheme, auth)?;
+    let perform_result = {
         let mut transfer = easy.transfer();
         transfer.write_function(|data| {
             file.write_all(data)
                 .map(|_| data.len())
                 .map_err(|_| curl::easy::WriteError::Pause)
         }).map_err(|error| anyhow::anyhow!("curl write_function: {}", error))?;
-        transfer.perform().map_err(|error| anyhow::anyhow!("curl: {}", error))?;
-    }
-    Ok(())
+        transfer.perform()
+    };
+    finish_fetch(&mut easy, &scheme, perform_result)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{classify, expand_glob, SourceKind};
+    use super::*;
     use std::path::PathBuf;
 
     /// tiny scoped tempdir, removed on drop. avoids a tempfile dev-dependency
@@ -398,5 +528,61 @@ mod tests {
     fn expand_glob_bad_pattern_is_a_clear_error() {
         // unclosed character class is a pattern error, not a silent empty
         assert!(expand_glob("/tmp/[").is_err());
+    }
+
+    #[test]
+    fn http_401_maps_to_auth_required() {
+        // 22 = CURLE_HTTP_RETURNED_ERROR (fail_on_error fired)
+        assert_eq!(auth_failure_hint("http", 22, 401).as_deref(), Some("http 401 unauthorized"));
+        assert!(auth_failure_hint("https", 22, 401).is_some());
+        // fail_on_error is documented to let 401 slip through as a "success"
+        // once http auth is engaged, so curl code 0 + status 401 must also
+        // classify as auth-required (this is the wrong-password retry path)
+        assert!(auth_failure_hint("https", 0, 401).is_some());
+    }
+
+    #[test]
+    fn login_denied_maps_to_auth_required_for_ftp_and_sftp() {
+        // 67 = CURLE_LOGIN_DENIED
+        assert_eq!(auth_failure_hint("ftp", 67, 0).as_deref(), Some("login denied"));
+        assert!(auth_failure_hint("sftp", 67, 0).is_some());
+    }
+
+    #[test]
+    fn other_failures_stay_plain_errors() {
+        assert!(auth_failure_hint("http", 22, 403).is_none());  // forbidden: credentials will not help
+        assert!(auth_failure_hint("http", 22, 407).is_none());  // proxy auth is out of scope
+        assert!(auth_failure_hint("http", 28, 0).is_none());    // timeout
+        assert!(auth_failure_hint("sftp", 1, 0).is_none());     // unsupported protocol
+        assert!(auth_failure_hint("ftp", 22, 401).is_none());   // http rules never apply to ftp
+    }
+
+    #[test]
+    fn auth_required_error_survives_the_anyhow_downcast() {
+        let error: anyhow::Error = AuthRequiredError {
+            scheme: "http".to_string(),
+            hint: "http 401 unauthorized".to_string(),
+        }.into();
+        let recovered = error.downcast_ref::<AuthRequiredError>().expect("downcast back");
+        assert_eq!(recovered.scheme, "http");
+        assert_eq!(recovered.hint, "http 401 unauthorized");
+    }
+
+    #[test]
+    fn fetch_auth_from_config_maps_the_netrc_flag() {
+        let mut config = crate::config::Config::default();
+        config.use_netrc = false;
+        assert!(!FetchAuth::from_config(&config).use_netrc);
+        config.use_netrc = true;
+        let auth = FetchAuth::from_config(&config);
+        assert!(auth.use_netrc);
+        assert!(auth.credentials.is_none());
+    }
+
+    #[test]
+    fn url_scheme_is_the_lowercased_prefix() {
+        assert_eq!(url_scheme("HTTPS://Example.com/x.torrent"), "https");
+        assert_eq!(url_scheme("sftp://host/x"), "sftp");
+        assert_eq!(url_scheme("no-scheme-here"), "no-scheme-here");
     }
 }
