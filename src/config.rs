@@ -106,6 +106,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub proxy_tracker_connections: bool,
 
+    // ─── remote fetch auth ────────────────────────────────────────────────
+    /// authenticate http/ftp/sftp torrent fetches from ~/.netrc entries
+    /// (curl NetRc::Optional). inert when the file does not exist; explicit
+    /// per-transfer credentials always win over a netrc entry.
+    #[serde(default = "default_true")]
+    pub use_netrc: bool,
+
     // ─── ip filter ─────────────────────────────────────────────────────────
     /// local path to an ip filter (PeerGuardian P2P format or CIDR lines).
     /// loaded on every daemon start.
@@ -256,6 +263,7 @@ impl Default for Config {
             proxy_password: String::new(),
             proxy_peer_connections: true,
             proxy_tracker_connections: true,
+            use_netrc: true,
             ip_filter_path: String::new(),
             ip_filter_url: String::new(),
             ip_filter_refresh_hours: default_ip_filter_refresh_hours(),
@@ -547,5 +555,13 @@ mod tests {
             config.sanitize();
             assert_eq!(config.add_result_review, value);
         }
+    }
+
+    #[test]
+    fn use_netrc_defaults_true_and_survives_a_missing_key() {
+        // old config.toml files have no use_netrc line; serde default fills it
+        let config: Config = toml::from_str("").expect("empty config parses");
+        assert!(config.use_netrc);
+        assert!(Config::default().use_netrc);
     }
 }

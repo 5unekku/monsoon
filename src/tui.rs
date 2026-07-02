@@ -462,6 +462,15 @@ const SETTING_FIELDS: &[SettingField] = &[
         restart_required: true,
         is_list: false,
     },
+    SettingField {
+        section: "security & anonymity",
+        key: "use_netrc",
+        label: "use ~/.netrc for fetches",
+        description: "authenticate http/ftp/sftp torrent fetches from ~/.netrc entries. inert when the file does not exist; turn off if you consider a netrc file itself a liability.",
+        kind: FieldKind::Bool,
+        restart_required: false,
+        is_list: false,
+    },
 
     // ── connection (interface binding is a vpn kill-switch) ──
     SettingField {
@@ -697,6 +706,7 @@ fn config_value_string(config: &Config, key: &str) -> String {
         "proxy_password" => config.proxy_password.clone(),
         "proxy_peer_connections" => config.proxy_peer_connections.to_string(),
         "proxy_tracker_connections" => config.proxy_tracker_connections.to_string(),
+        "use_netrc" => config.use_netrc.to_string(),
         "autostart" => crate::autostart::is_enabled().to_string(),
         _ => String::new(),
     }

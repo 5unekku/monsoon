@@ -462,6 +462,7 @@ impl App {
             "proxy_password" => self.config.proxy_password = value.to_string(),
             "proxy_peer_connections" => self.config.proxy_peer_connections = parse_bool(value),
             "proxy_tracker_connections" => self.config.proxy_tracker_connections = parse_bool(value),
+            "use_netrc" => self.config.use_netrc = parse_bool(value),
             "max_active_downloads" | "active_downloads" => self.config.max_active_downloads = value.parse()?,
             "max_active_uploads" | "active_uploads" => self.config.max_active_uploads = value.parse()?,
             "max_active_torrents" | "active_limit" => self.config.max_active_torrents = value.parse()?,
