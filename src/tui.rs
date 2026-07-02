@@ -634,6 +634,15 @@ const SETTING_FIELDS: &[SettingField] = &[
     },
     SettingField {
         section: "paths",
+        key: "recent_paths_limit",
+        label: "recent save paths limit",
+        description: "recent save paths to remember (0 disables). the list is shown by ctrl+r in the add form's download path editor and the move prompt.",
+        kind: FieldKind::Integer,
+        restart_required: false,
+        is_list: false,
+    },
+    SettingField {
+        section: "paths",
         key: "watch_directories",
         label: "watch directories",
         description: "directories the daemon watches for .torrent files to auto-add. one path per entry.",
@@ -663,6 +672,7 @@ fn config_value_string(config: &Config, key: &str) -> String {
         "download_rate_limit" => config.download_rate_limit.to_string(),
         "upload_rate_limit" => config.upload_rate_limit.to_string(),
         "default_save_path" => config.default_save_path.clone(),
+        "recent_paths_limit" => config.recent_paths_limit.to_string(),
         "enable_dht" => config.enable_dht.to_string(),
         "enable_lsd" => config.enable_lsd.to_string(),
         "enable_upnp" => config.enable_upnp.to_string(),
