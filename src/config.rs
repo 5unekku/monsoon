@@ -529,8 +529,10 @@ mod tests {
 
     #[test]
     fn sanitize_resets_invalid_add_result_review() {
-        let mut config = Config::default();
-        config.add_result_review = "sometimes".to_string();
+        let mut config = Config {
+            add_result_review: "sometimes".to_string(),
+            ..Config::default()
+        };
         config.sanitize();
         assert_eq!(config.add_result_review, "always");
     }
@@ -538,8 +540,10 @@ mod tests {
     #[test]
     fn sanitize_keeps_valid_add_result_review_values() {
         for value in ["always", "never"] {
-            let mut config = Config::default();
-            config.add_result_review = value.to_string();
+            let mut config = Config {
+                add_result_review: value.to_string(),
+                ..Config::default()
+            };
             config.sanitize();
             assert_eq!(config.add_result_review, value);
         }
