@@ -1232,7 +1232,7 @@ impl App {
                     }
                 }
             }
-            Request::Add { uri, save_path, category, start_paused, content_layout } => {
+            Request::Add { uri, save_path, category, start_paused, content_layout, credentials: _ } => {
                 // delegate scheme + path resolution to the sources module so
                 // http/https/ftp/sftp urls and ~ expansion work uniformly.
                 let result = match crate::sources::resolve(&uri) {

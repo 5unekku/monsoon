@@ -99,11 +99,31 @@ pub struct TorrentDetail {
     pub trackers: Vec<TrackerInfo>,
 }
 
+/// one-shot credentials for a single fetch. never persisted anywhere:
+/// the daemon applies them to one curl handle and drops them.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TransferCredentials {
+    pub username: String,
+    pub password: String,
+}
+
+// manual impl instead of derive: Request derives Debug and requests can be
+// logged, so the password must never reach a log line. the ipc test pins
+// this; keep the manual impl through any future field cleanup.
+impl std::fmt::Debug for TransferCredentials {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("TransferCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     List,
     Info { index: usize },
-    Add { uri: String, save_path: Option<String>, category: Option<String>, start_paused: bool, #[serde(default)] content_layout: ContentLayout },
+    Add { uri: String, save_path: Option<String>, category: Option<String>, start_paused: bool, #[serde(default)] content_layout: ContentLayout, #[serde(default)] credentials: Option<TransferCredentials> },
     Remove { index: usize, delete_files: bool },
     Pause { index: usize },
     Resume { index: usize },
@@ -292,6 +312,11 @@ pub enum Response {
     /// before it will commit the rename or move. resend the original request
     /// with `decisions` filled in.
     RenameConfirmation { concerns: Vec<RenameConcern> },
+    /// the fetch behind an Add needs credentials. resend the identical Add
+    /// with `credentials` filled in. `url` echoes the original input uri;
+    /// `scheme` is the literal lowercase url scheme; `hint` is human text
+    /// derived from the curl error.
+    AuthRequired { url: String, scheme: String, hint: String },
     /// magnet URI for a torrent (empty string when invalid or not yet ready)
     Magnet(String),
     /// list of categories
@@ -322,5 +347,46 @@ mod tests {
         assert_eq!(ContentLayout::Default.resolve("garbage"), ContentLayout::IfMultiple);
         // non-default passes through untouched
         assert_eq!(ContentLayout::Never.resolve("always"), ContentLayout::Never);
+    }
+
+    #[test]
+    fn add_request_without_credentials_still_deserializes() {
+        // json an old client would send: no credentials key at all
+        let json = r#"{"Add":{"uri":"magnet:?xt=urn:btih:aaa","save_path":null,"category":null,"start_paused":false}}"#;
+        let request: Request = serde_json::from_str(json).expect("old add json parses");
+        match request {
+            Request::Add { credentials, .. } => assert!(credentials.is_none()),
+            other => panic!("expected Add, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn auth_required_response_round_trips() {
+        let response = Response::AuthRequired {
+            url: "http://tracker.example/file.torrent".to_string(),
+            scheme: "http".to_string(),
+            hint: "http 401 unauthorized".to_string(),
+        };
+        let json = serde_json::to_string(&response).expect("serialize");
+        let parsed: Response = serde_json::from_str(&json).expect("parse");
+        match parsed {
+            Response::AuthRequired { url, scheme, hint } => {
+                assert_eq!(url, "http://tracker.example/file.torrent");
+                assert_eq!(scheme, "http");
+                assert_eq!(hint, "http 401 unauthorized");
+            }
+            other => panic!("expected AuthRequired, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn transfer_credentials_debug_never_contains_the_password() {
+        let credentials = TransferCredentials {
+            username: "alice".to_string(),
+            password: "hunter2".to_string(),
+        };
+        let debug_output = format!("{:?}", credentials);
+        assert!(!debug_output.contains("hunter2"));
+        assert!(debug_output.contains("alice"));
     }
 }

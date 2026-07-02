@@ -47,6 +47,11 @@ pub fn print_response(response: Response) {
         Response::Err(message) => eprintln!("error: {}", message),
         // daemon should never send this to the cli client; ignore gracefully
         Response::RenameConfirmation { .. } => eprintln!("unexpected rename confirmation response"),
+        // cli add is non-interactive by design; netrc is the scripted answer
+        Response::AuthRequired { url, hint, .. } => eprintln!(
+            "authentication required for {} ({}); add an entry to ~/.netrc or use the tui",
+            url, hint
+        ),
     }
 }
 

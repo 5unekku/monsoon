@@ -2869,6 +2869,7 @@ fn dispatch_add_options(form: AddOptionsForm, state: &mut AppState) {
             category: None,
             start_paused: true,
             content_layout: options.content_layout,
+            credentials: None,
         }) {
             Ok(Response::Added { id }) => Some(id),
             Ok(Response::Err(message)) => {
