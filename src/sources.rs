@@ -170,7 +170,7 @@ fn finish_fetch(
     let http_status = easy.response_code().unwrap_or(0);
     match perform_result {
         Err(error) => {
-            if let Some(hint) = auth_failure_hint(scheme, error.code() as u32, http_status) {
+            if let Some(hint) = auth_failure_hint(scheme, error.code(), http_status) {
                 return Err(AuthRequiredError { scheme: scheme.to_string(), hint }.into());
             }
             Err(anyhow::anyhow!("curl: {}", error))
