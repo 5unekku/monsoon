@@ -170,7 +170,12 @@ fn finish_fetch(
     let http_status = easy.response_code().unwrap_or(0);
     match perform_result {
         Err(error) => {
-            if let Some(hint) = auth_failure_hint(scheme, error.code(), http_status) {
+            // curl_sys::CURLcode is c_int on msvc but c_uint elsewhere, so the
+            // cast is load-bearing on windows even though clippy calls it
+            // unnecessary on unix
+            #[allow(clippy::unnecessary_cast)]
+            let curl_code = error.code() as u32;
+            if let Some(hint) = auth_failure_hint(scheme, curl_code, http_status) {
                 return Err(AuthRequiredError { scheme: scheme.to_string(), hint }.into());
             }
             Err(anyhow::anyhow!("curl: {}", error))
